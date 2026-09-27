@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">巴别回声</string>
+    <string name="notification_channel">录音</string>
+    <string name="notification_recording">正在录制会议声音</string>
+    <string name="notification_stop">停止录音</string>
+</resources>

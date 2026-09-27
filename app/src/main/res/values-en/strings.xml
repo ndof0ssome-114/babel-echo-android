@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Babel Echo</string>
+    <string name="notification_channel">Recording</string>
+    <string name="notification_recording">Recording meeting audio</string>
+    <string name="notification_stop">Stop recording</string>
+</resources>

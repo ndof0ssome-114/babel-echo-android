@@ -151,7 +151,7 @@ private fun BabelEchoApp(viewModel: MainViewModel) {
 }
 
 @Composable
-private fun NavigationBarScope.NavItem(current: AppPage, target: AppPage, icon: ImageVector, label: String, onChange: (AppPage) -> Unit) {
+private fun RowScope.NavItem(current: AppPage, target: AppPage, icon: ImageVector, label: String, onChange: (AppPage) -> Unit) {
     NavigationBarItem(selected = current == target, onClick = { onChange(target) }, icon = { Icon(icon, null) }, label = { Text(label) })
 }
 

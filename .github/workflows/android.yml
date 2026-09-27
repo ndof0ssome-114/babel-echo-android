@@ -28,9 +28,11 @@ jobs:
           "$SDKMANAGER" 'platforms;android-36' 'build-tools;36.0.0'
       - name: Build and lint
         run: ./gradlew --no-daemon :app:assembleDebug :app:lintDebug
+      - name: Verify APK signature
+        run: /usr/local/lib/android/sdk/build-tools/36.0.0/apksigner verify --verbose --print-certs app/build/outputs/apk/debug/app-debug.apk
       - name: Rename APK
         run: cp app/build/outputs/apk/debug/app-debug.apk BabelEcho-Android-0.1.0-alpha.1-debug.apk
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: BabelEcho-Android-0.1.0-alpha.1-debug
           path: BabelEcho-Android-0.1.0-alpha.1-debug.apk

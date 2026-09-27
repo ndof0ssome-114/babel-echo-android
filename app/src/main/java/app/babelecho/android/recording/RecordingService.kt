@@ -89,13 +89,15 @@ class RecordingService : Service() {
                 }
                 check(resultCode != 0 && resultData != null) { "System audio permission was not granted" }
                 val manager = getSystemService(MediaProjectionManager::class.java)
-                mediaProjection = manager.getMediaProjection(resultCode, resultData).also {
-                    it.registerCallback(object : MediaProjection.Callback() {
-                        override fun onStop() {
-                            thread(name = "babel-projection-stop") { stopCapture(save = true) }
-                        }
-                    }, null)
+                val projection = checkNotNull(manager.getMediaProjection(resultCode, resultData)) {
+                    "Cannot start system audio capture"
                 }
+                projection.registerCallback(object : MediaProjection.Callback() {
+                    override fun onStop() {
+                        thread(name = "babel-projection-stop") { stopCapture(save = true) }
+                    }
+                }, null)
+                mediaProjection = projection
             }
 
             val micRecord = if (useMicrophone) createMicrophoneRecord() else null

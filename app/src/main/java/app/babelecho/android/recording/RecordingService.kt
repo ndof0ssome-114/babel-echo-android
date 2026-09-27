@@ -1,6 +1,7 @@
 package app.babelecho.android.recording
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -118,6 +119,7 @@ class RecordingService : Service() {
         }
     }
 
+    @SuppressLint("MissingPermission") // RECORD_AUDIO is checked before either AudioRecord is created.
     private fun createMicrophoneRecord(): AudioRecord {
         val format = audioFormat()
         val bufferSize = max(
@@ -132,6 +134,7 @@ class RecordingService : Service() {
             .also { check(it.state == AudioRecord.STATE_INITIALIZED) { "Cannot initialize microphone" } }
     }
 
+    @SuppressLint("MissingPermission") // RECORD_AUDIO is checked before either AudioRecord is created.
     private fun createPlaybackRecord(projection: MediaProjection): AudioRecord {
         val config = AudioPlaybackCaptureConfiguration.Builder(projection)
             .addMatchingUsage(AudioAttributes.USAGE_MEDIA)

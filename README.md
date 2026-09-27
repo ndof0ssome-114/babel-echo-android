@@ -37,7 +37,7 @@
 
 ## 构建
 
-需要 JDK 17、Android SDK 37 和 Build Tools 36.0.0：
+需要 JDK 17 和 Android SDK 36：
 
 ```bash
 ./gradlew :app:assembleDebug

@@ -1,62 +1,88 @@
-# 巴别回声 Android
+# 巴别回声 Android / Babel Echo Android
 
-> 将散落的声音，整理成可检索的会议记录。
+> 将散落的声音，整理成可检索、可追问的会议记录。
+> Turn scattered voices into searchable meeting records you can ask about.
 
-巴别回声 Android 是一款处于早期测试阶段的原生 Android 会议录音与整理工具。它可以同时采集麦克风和 Android 允许捕获的系统媒体声音，将录音保存在本机，并通过你自己配置的 OpenAI 兼容服务完成转写与摘要。
+巴别回声 Android 是原生 Android 会议录音与整理工具。它沿用桌面版的会议工作台结构，同时适配手机单手操作：录音过程中可查看实时转写与摘要，结束后可生成结构化纪要、翻译内容、追问会议信息并导出 Markdown。
 
-**当前版本：`0.1.0-alpha.1`**
+Babel Echo Android is a native meeting recorder and assistant based on the desktop workspace. It combines live capture, transcription, summaries, structured minutes, translation, meeting Q&A, and Markdown sharing in a mobile interface.
 
-## 已实现
+**当前测试版 / Current alpha: `0.2.0-alpha.2`**
 
-- 麦克风录音、系统媒体声音录制，或两者实时混音
-- 本地保存标准 PCM WAV，不会自动上传
-- 每次采集系统声音前显示 Android 系统授权页
-- 可编辑 ASR/LLM 服务地址、模型 ID、语言与 API Key
-- 兼容 Groq、DeepSeek、OpenAI 兼容网关与局域网本地模型服务
-- API Key 由 Android Keystore 生成的 AES-GCM 密钥加密保存
-- 转写分段时使用可调重叠窗口，并把前文尾部传给下一段，减少句子被切断
-- 摘要仅手动触发；长文本使用分层摘要，避免滚动摘要反复扩大上下文
-- 简体中文界面，系统为其他语言时提供英文应用名与系统通知
+## 主要功能 / Features
 
-## 系统要求与限制
+- 麦克风、Android 允许捕获的系统媒体声音，或两者实时混音
+- 录音暂停与继续、实时音量显示、本机 PCM WAV 存档
+- 可调转写分段与重叠时间，并以前一段尾部提示下一段，减少句子切断
+- 增量摘要只发送上次摘要和新增片段，降低长会议重复上下文消耗
+- 转写、摘要、结构化纪要、翻译、带时间戳的会议问答与统计
+- 工作区、历史记录、设置三段式导航，以及接近桌面版的半透明卡片视觉
+- 中文、日文和英文界面与识别语言选择
+- 分别指定摘要、纪要、翻译和问答模型
+- 兼容 OpenAI 风格的云端接口与局域网本地服务；本地服务可设为无需 API Key
+- API Key 使用 Android Keystore 生成的 AES-GCM 密钥加密保存
 
-- Android 10（API 29）或更高版本
-- 系统声音使用 Android `AudioPlaybackCapture`。播放器必须允许第三方捕获，因此通话、受 DRM 保护的内容，以及主动禁止捕获的应用可能没有声音。
-- Android 14 及以上每次录制都必须重新取得媒体投影同意，这是系统隐私要求。
-- 当前 APK 是测试签名版本，不适合商店分发。正式发布前需要独立签名、隐私政策页面与更多设备测试。
+---
 
-## 使用
+- Capture microphone audio, Android-permitted media playback, or a live mix of both
+- Pause and resume, live level meter, and local PCM WAV archives
+- Configurable ASR chunk and overlap windows with previous-text prompting across boundaries
+- Incremental summaries send only the previous summary and new transcript segments
+- Transcript, summary, structured minutes, translation, timestamp-aware Q&A, and statistics
+- Mobile workspace, history, and settings navigation with a translucent card interface
+- Chinese, Japanese, and English UI and recognition language choices
+- Separate model IDs for summary, minutes, translation, and Q&A
+- OpenAI-compatible cloud endpoints and LAN-hosted local services, including no-key local endpoints
+- API keys encrypted with an AES-GCM key managed by Android Keystore
 
-1. 在“设置”中填写语音识别服务和摘要模型。
-2. 选择麦克风、系统声音或两者。
-3. 点击“开始录音”，并按系统提示授权。
-4. 停止后，录音仅保存在应用私有目录。
-5. 点击“转写”或“生成摘要”时，相关内容才会发送到你配置的服务。
+## 使用 / Getting started
 
-局域网本地模型可以使用 OpenAI 兼容地址，例如模拟器访问宿主机时常用的 `http://10.0.2.2:端口/v1`。只有在可信网络中才应启用“不安全 HTTP”。
+1. 在“设置”填写 ASR 与文本模型地址、模型 ID 和密钥；本地无鉴权服务可开启“无需密钥”。
+2. 选择麦克风、系统声音或两者，点击“开始录音”。
+3. 使用系统声音时，按 Android 系统页面授权屏幕/媒体捕获。
+4. 在工作区切换转写、摘要、纪要、问答和统计；结束后可从历史记录重新打开。
+5. 使用分享按钮导出 Markdown 文本。
 
-## 构建
+1. Configure ASR and text endpoints, model IDs, and keys in Settings. Enable no-key mode for compatible local services.
+2. Select microphone, device audio, or both, then start recording.
+3. Grant Android's media capture consent when device audio is enabled.
+4. Use the Transcript, Summary, Minutes, Ask, and Stats tabs during or after the meeting.
+5. Share the meeting as Markdown text.
 
-需要 JDK 17 和 Android SDK 36：
+局域网模型可填写 OpenAI 兼容地址。Android 模拟器访问宿主机时通常使用 `http://10.0.2.2:端口/v1`，并需要开启“允许 HTTP”。请只连接可信局域网。
+
+For a LAN-hosted model, enter its OpenAI-compatible base URL. An Android emulator commonly reaches the host at `http://10.0.2.2:PORT/v1`; enable HTTP only for a trusted local network.
+
+## 系统限制 / Platform limits
+
+- 需要 Android 10（API 29）或更高版本。
+- 系统声音使用 `AudioPlaybackCapture`。通话、DRM 内容以及禁止第三方捕获的应用可能没有声音。
+- Android 14 及以上每次录制均要求新的媒体投影同意。
+- 当前 APK 使用测试签名，仅用于设备测试，不适合应用商店分发。
+
+---
+
+- Android 10 (API 29) or newer is required.
+- Device audio uses `AudioPlaybackCapture`. Calls, DRM media, and apps that block capture may be silent.
+- Android 14+ requires fresh MediaProjection consent for every recording session.
+- Current APKs use a test signature and are intended for device testing rather than store distribution.
+
+## 构建 / Build
+
+需要 JDK 17 与 Android SDK 36：
 
 ```bash
 ./gradlew :app:assembleDebug
 ```
 
-APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。GitHub Actions 也会在每次推送后生成可下载的测试 APK artifact。
+APK 输出到 `app/build/outputs/apk/debug/app-debug.apk`。GitHub Actions 会对每次提交执行编译、Lint 和 APK 签名验证。
 
-## 隐私与合规
+The APK is written to `app/build/outputs/apk/debug/app-debug.apk`. GitHub Actions builds, lints, and verifies the APK signature on every push.
 
-请先取得会议参与者同意，并遵守所在地关于录音、个人信息和跨境传输的规定。项目不包含任何 API Key、用户录音或会议数据。详细说明见 [PRIVACY.md](PRIVACY.md) 和 [SECURITY.md](SECURITY.md)。
+## 隐私、合规与许可 / Privacy, compliance, and license
 
-## English
+开始录音前请取得参与者同意，并遵守所在地法律、雇主政策与会议平台条款。仓库不包含 API Key、录音或会议数据。数据发送范围与保存方式见 [PRIVACY.md](PRIVACY.md)，安全问题见 [SECURITY.md](SECURITY.md)。
 
-Babel Echo Android is an early native Android meeting recorder. It can mix microphone input with capturable media playback, save PCM WAV recordings locally, and send content to user-configured OpenAI-compatible transcription and chat services only after an explicit action.
+Obtain participant consent before recording and follow applicable laws, workplace policies, and meeting platform terms. The repository contains no API keys, recordings, or meeting data. See [PRIVACY.md](PRIVACY.md) for data handling and [SECURITY.md](SECURITY.md) for security reporting.
 
-The app requires Android 10+. Playback capture is limited by Android: calls, DRM-protected media, and apps that disable capture may be silent. Android 14+ requires fresh MediaProjection consent for every recording session.
-
-API keys are encrypted with an AES-GCM key held by Android Keystore. Recordings stay in app-private storage until the user explicitly requests transcription. This alpha uses a debug signature and is intended for device testing, not store distribution.
-
-## License
-
-Source code is available under the Apache License 2.0. The Babel Echo name and artwork are not granted for unrelated commercial branding by the software license.
+Source code is licensed under Apache License 2.0. The Babel Echo name and artwork are not granted for unrelated commercial branding by the software license.

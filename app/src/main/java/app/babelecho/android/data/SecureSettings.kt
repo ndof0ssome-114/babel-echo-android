@@ -14,15 +14,24 @@ class SecureSettings(context: Context) {
     private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
     fun load(): AppSettings = AppSettings(
+        uiLanguage = prefs.getString("ui_language", null) ?: "zh",
         asrBaseUrl = prefs.getString("asr_base_url", null) ?: AppSettings().asrBaseUrl,
         asrModel = prefs.getString("asr_model", null) ?: AppSettings().asrModel,
         asrLanguage = prefs.getString("asr_language", null) ?: AppSettings().asrLanguage,
         asrApiKey = decrypt(prefs.getString("asr_key", null)),
+        asrNoAuth = prefs.getBoolean("asr_no_auth", false),
         llmBaseUrl = prefs.getString("llm_base_url", null) ?: AppSettings().llmBaseUrl,
         llmModel = prefs.getString("llm_model", null) ?: AppSettings().llmModel,
+        summaryModel = prefs.getString("summary_model", null) ?: prefs.getString("llm_model", null) ?: AppSettings().summaryModel,
+        minutesModel = prefs.getString("minutes_model", null) ?: prefs.getString("llm_model", null) ?: AppSettings().minutesModel,
+        translateModel = prefs.getString("translate_model", null) ?: prefs.getString("llm_model", null) ?: AppSettings().translateModel,
+        askModel = prefs.getString("ask_model", null) ?: prefs.getString("llm_model", null) ?: AppSettings().askModel,
         llmApiKey = decrypt(prefs.getString("llm_key", null)),
+        llmNoAuth = prefs.getBoolean("llm_no_auth", false),
         chunkSeconds = prefs.getInt("chunk_seconds", 25).coerceIn(10, 120),
         overlapSeconds = prefs.getInt("overlap_seconds", 2).coerceIn(0, 10),
+        autoSummarySeconds = prefs.getInt("auto_summary_seconds", 180).let { if (it == 0) 0 else it.coerceIn(60, 1_800) },
+        translateTo = prefs.getString("translate_to", null) ?: "",
         allowInsecureHttp = prefs.getBoolean("allow_insecure_http", false),
     )
 
@@ -31,16 +40,27 @@ class SecureSettings(context: Context) {
         require(value.overlapSeconds in 0..10 && value.overlapSeconds < value.chunkSeconds) {
             "Overlap must be shorter than the chunk duration"
         }
+        require(value.uiLanguage in setOf("zh", "ja", "en")) { "Unsupported interface language" }
+        require(value.autoSummarySeconds == 0 || value.autoSummarySeconds in 60..1_800) { "Auto summary must be off or 60–1800 seconds" }
         prefs.edit()
+            .putString("ui_language", value.uiLanguage)
             .putString("asr_base_url", value.asrBaseUrl.trim().trimEnd('/'))
             .putString("asr_model", value.asrModel.trim())
             .putString("asr_language", value.asrLanguage.trim().ifBlank { "auto" })
             .putString("asr_key", encrypt(value.asrApiKey.trim()))
+            .putBoolean("asr_no_auth", value.asrNoAuth)
             .putString("llm_base_url", value.llmBaseUrl.trim().trimEnd('/'))
             .putString("llm_model", value.llmModel.trim())
+            .putString("summary_model", value.summaryModel.trim())
+            .putString("minutes_model", value.minutesModel.trim())
+            .putString("translate_model", value.translateModel.trim())
+            .putString("ask_model", value.askModel.trim())
             .putString("llm_key", encrypt(value.llmApiKey.trim()))
+            .putBoolean("llm_no_auth", value.llmNoAuth)
             .putInt("chunk_seconds", value.chunkSeconds)
             .putInt("overlap_seconds", value.overlapSeconds)
+            .putInt("auto_summary_seconds", value.autoSummarySeconds)
+            .putString("translate_to", value.translateTo)
             .putBoolean("allow_insecure_http", value.allowInsecureHttp)
             .apply()
     }

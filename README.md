@@ -7,7 +7,7 @@
 
 Babel Echo Android is a native meeting recorder and assistant based on the desktop workspace. It combines live capture, transcription, summaries, structured minutes, translation, meeting Q&A, and Markdown sharing in a mobile interface.
 
-**当前测试版 / Current alpha: `0.2.0-alpha.3`**
+**当前测试版 / Current alpha: `0.2.0-alpha.4`**
 
 ## 主要功能 / Features
 

@@ -22,4 +22,4 @@ Start with `README.md`, `PRIVACY.md`, and `SECURITY.md`.
 
 ## Verification
 
-Run `./gradlew :app:assembleDebug lint` with JDK 17 and Android SDK 36. Test microphone-only, playback-only, and mixed capture on a physical Android 10+ device because emulators do not represent every vendor audio path.
+Run `./gradlew :app:assembleDebug lint` with JDK 17 and Android SDK 37. Test microphone-only, playback-only, and mixed capture on a physical Android 10+ device because emulators do not represent every vendor audio path.

@@ -21,6 +21,7 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import app.babelecho.android.withUsage
 import app.babelecho.android.MainActivity
 import app.babelecho.android.R
 import app.babelecho.android.cloud.CloudClient
@@ -35,6 +36,7 @@ import java.util.Date
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 import kotlin.math.max
 import kotlinx.coroutines.runBlocking
@@ -43,6 +45,14 @@ class RecordingService : Service() {
     private val running = AtomicBoolean(false)
     private val stopping = AtomicBoolean(false)
     private val paused = AtomicBoolean(false)
+    private val captureDrained = AtomicBoolean(false)
+    private val recordedSamples = AtomicLong(0)
+    private var liveCloud: CloudClient? = null
+    private val liveEnabled = AtomicBoolean(true)
+    private var processing = false
+    private var captureSettings = app.babelecho.android.data.AppSettings()
+    private var lastError: String? = null
+    private var lastErrorAt = 0L
     private val records = mutableListOf<AudioRecord>()
     private val readers = mutableListOf<Thread>()
     private var mixer: Thread? = null
@@ -66,12 +76,11 @@ class RecordingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> thread(name = "babel-stop") { stopCapture(save = true) }
-            ACTION_PAUSE -> {
+            ACTION_PAUSE -> if (running.get() && !stopping.get()) {
                 paused.set(true)
-                liveQueue.clear()
                 broadcastState(true)
             }
-            ACTION_RESUME -> {
+            ACTION_RESUME -> if (running.get() && !stopping.get()) {
                 paused.set(false)
                 broadcastState(true)
             }
@@ -81,13 +90,12 @@ class RecordingService : Service() {
     }
 
     private fun startCapture(intent: Intent) {
-        if (!running.compareAndSet(false, true)) return
+        if (stopping.get() || !running.compareAndSet(false, true)) return
         stopping.set(false)
         useMicrophone = intent.getBooleanExtra(EXTRA_MICROPHONE, true)
         usePlayback = intent.getBooleanExtra(EXTRA_PLAYBACK, true)
-        startForegroundCompat(buildNotification())
-
         try {
+            startForegroundCompat(buildNotification())
             check(ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
                 "Microphone permission is required"
             }
@@ -97,6 +105,7 @@ class RecordingService : Service() {
             wavWriter = WavFileWriter(outputFile!!, SAMPLE_RATE)
             startedAt = System.currentTimeMillis()
             val settings = SecureSettings(this).load()
+            captureSettings = settings
             MeetingStore(this).save(
                 Meeting(
                     id = meetingId,
@@ -143,7 +152,7 @@ class RecordingService : Service() {
             val playbackQueue = playbackRecord?.let { ArrayBlockingQueue<ShortArray>(12) }
             if (micRecord != null) readers += startReader("babel-microphone", micRecord, micQueue!!)
             if (playbackRecord != null) readers += startReader("babel-playback", playbackRecord, playbackQueue!!)
-            if (settings.asrNoAuth || settings.asrApiKey.isNotBlank()) liveTranscriber = startLiveTranscriber(settings)
+            if (settings.liveTranscription && settings.hasAsr) liveTranscriber = startLiveTranscriber(settings)
             mixer = startMixer(micQueue, playbackQueue)
             broadcastState(true)
         } catch (error: Throwable) {
@@ -212,6 +221,7 @@ class RecordingService : Service() {
         playbackQueue: ArrayBlockingQueue<ShortArray>?,
     ) = thread(name = "babel-mixer") {
         var meterFrames = 0
+        try {
         while (running.get() || micQueue?.isNotEmpty() == true || playbackQueue?.isNotEmpty() == true) {
             val mic = micQueue?.poll(100, TimeUnit.MILLISECONDS)
             val playback = playbackQueue?.poll(100, TimeUnit.MILLISECONDS)
@@ -224,20 +234,29 @@ class RecordingService : Service() {
             }
             if (paused.get()) continue
             wavWriter?.write(mixed)
-            if (liveTranscriber != null && !liveQueue.offer(mixed.copyOf())) {
-                liveQueue.poll()
-                liveQueue.offer(mixed.copyOf())
+            recordedSamples.addAndGet(mixed.size.toLong())
+            if (liveTranscriber != null && liveEnabled.get() && !liveQueue.offer(mixed.copyOf())) {
+                // Keep local audio intact and stop live processing rather than creating false timestamps.
+                liveCloud?.cancel()
+                liveTranscriber?.interrupt()
+                liveEnabled.set(false)
+                liveQueue.clear()
+                broadcastState(true, "实时转写跟不上录音，已停止上传。音频已保留，可结束后重新转写 / Live ASR fell behind; audio is safe for later transcription")
             }
             if (++meterFrames % 5 == 0) {
                 val level = if (mixed.isEmpty()) 0f else mixed.sumOf { kotlin.math.abs(it.toInt()).toLong() }.toFloat() / mixed.size / 32768f
                 broadcastState(true, level = level.coerceIn(0f, 1f))
             }
+        } } catch (error: Exception) {
+            broadcastState(running.get(), "录音写入失败，正在保存已有音频 / Recording write failed: ${error.message}")
+            thread(name = "babel-write-error-stop") { stopCapture(save = true) }
         }
     }
 
     private fun startLiveTranscriber(settings: app.babelecho.android.data.AppSettings) = thread(name = "babel-live-asr") {
-        val cloud = CloudClient(this)
         val store = MeetingStore(this)
+        val cloud = CloudClient(this) { usage -> store.update(meetingId) { it.withUsage(usage) } }
+        liveCloud = cloud
         val accumulator = PcmAccumulator()
         val windowSamples = settings.chunkSeconds * SAMPLE_RATE
         val overlapSamples = settings.overlapSeconds * SAMPLE_RATE
@@ -250,62 +269,61 @@ class RecordingService : Service() {
             val temp = File(cacheDir, "live-$meetingId-${System.nanoTime()}.wav")
             try {
                 WavFileWriter(temp, SAMPLE_RATE).use { it.write(samples) }
-                val text = runBlocking { cloud.transcribeChunk(temp, settings, previousTail) }.trim()
-                if (text.isBlank()) return
+                val received = runBlocking { cloud.transcribeResult(temp, settings, previousTail) }
+                if (Thread.currentThread().isInterrupted) return
                 val startMs = windowStartSamples * 1_000 / SAMPLE_RATE
-                val endMs = startMs + samples.size * 1_000L / SAMPLE_RATE
-                val id = store.list().firstOrNull { it.id == meetingId }?.segments?.size ?: 0
-                var segment = TranscriptSegment(id, startMs, endMs, text = text)
-                if (settings.translateTo.isNotBlank()) {
-                    val translated = runCatching {
-                        runBlocking { cloud.translateSegments(listOf(segment), settings.translateTo, settings) }.firstOrNull().orEmpty()
-                    }.getOrDefault("")
-                    segment = segment.copy(translated = translated)
-                }
+                val currentMeeting = store.get(meetingId) ?: return
+                var tail = previousTail
+                val additions = received.mapNotNull { item ->
+                    val clean = cloud.removeOverlap(tail, item.text)
+                    if (clean.isBlank()) null else {
+                        tail = (tail + "\n" + clean).takeLast(240)
+                        item.copy(startMs = item.startMs + startMs, endMs = item.endMs + startMs, text = clean)
+                    }
+                }.mapIndexed { i, item -> item.copy(id = currentMeeting.segments.size + i) }
+                if (additions.isEmpty()) return
+                val translated = if (settings.translateTo.isNotBlank() && settings.hasText("translation")) runCatching {
+                    runBlocking { cloud.translateSegments(additions, settings.translateTo, settings) }
+                }.onFailure { if (running.get()) broadcastState(true, "翻译失败，原文已保留 / Translation failed: ${it.message}") }.getOrNull() else null
                 store.update(meetingId) { meeting ->
-                    val updated = meeting.segments + segment
-                    meeting.copy(
-                        transcript = updated.joinToString("\n") { it.text },
-                        segments = updated,
-                        stats = meeting.stats.copy(
-                            asrCalls = meeting.stats.asrCalls + 1,
-                            transcriptChars = updated.sumOf { it.text.length },
-                        ),
-                    )
+                    val updated = meeting.segments + additions.mapIndexed { i, item -> item.copy(translated = translated?.get(i).orEmpty()) }
+                    meeting.copy(transcript = updated.joinToString("\n") { it.text }, segments = updated,
+                        stats = meeting.stats.copy(transcriptChars = updated.sumOf { it.text.length }))
                 }
-                previousTail = text.takeLast(240)
+                previousTail = tail
                 sendBroadcast(Intent(ACTION_SEGMENT).setPackage(packageName).putExtra(EXTRA_MEETING_ID, meetingId))
 
-                val current = store.list().firstOrNull { it.id == meetingId } ?: return
-                val due = settings.autoSummarySeconds > 0 &&
+                val current = store.get(meetingId) ?: return
+                val due = settings.hasText("summary") && settings.autoSummarySeconds > 0 &&
                     System.currentTimeMillis() - lastSummaryAt >= settings.autoSummarySeconds * 1_000L &&
                     current.segments.size > summarizedSegments
                 if (due) {
                     val newSegments = current.segments.drop(summarizedSegments)
                     val summary = runBlocking { cloud.updateSummary(current.summary, newSegments, settings) }
                     store.update(meetingId) { meeting ->
-                        meeting.copy(summary = summary, stats = meeting.stats.copy(llmCalls = meeting.stats.llmCalls + 1))
+                        meeting.copy(summary = summary)
                     }
                     summarizedSegments = current.segments.size
                     lastSummaryAt = System.currentTimeMillis()
                     sendBroadcast(Intent(ACTION_SEGMENT).setPackage(packageName).putExtra(EXTRA_MEETING_ID, meetingId))
                 }
-            } catch (error: Throwable) {
-                broadcastState(true, "实时转写失败：${error.message ?: error.javaClass.simpleName}")
+            } catch (error: Exception) {
+                if (error is InterruptedException) Thread.currentThread().interrupt()
+                if (running.get() && !Thread.currentThread().isInterrupted) broadcastState(true, "实时处理失败 / Live processing failed: ${error.message ?: error.javaClass.simpleName}")
             } finally {
                 temp.delete()
             }
         }
 
-        while (running.get() || liveQueue.isNotEmpty()) {
-            val chunk = liveQueue.poll(200, TimeUnit.MILLISECONDS) ?: continue
+        while ((!captureDrained.get() || liveQueue.isNotEmpty()) && !Thread.currentThread().isInterrupted) {
+            val chunk = try { liveQueue.poll(200, TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); break } ?: continue
             accumulator.add(chunk)
             while (accumulator.size >= windowSamples) {
                 process(accumulator.take(windowSamples, overlapSamples))
                 windowStartSamples += (windowSamples - overlapSamples).toLong()
             }
         }
-        if (accumulator.size >= SAMPLE_RATE) process(accumulator.take(accumulator.size, 0))
+        if (!Thread.currentThread().isInterrupted && accumulator.size > overlapSamples) process(accumulator.take(accumulator.size, 0))
     }
 
     private fun stopCapture(save: Boolean) {
@@ -314,7 +332,15 @@ class RecordingService : Service() {
         records.forEach { runCatching { it.stop() } }
         readers.forEach { runCatching { it.join(1_000) } }
         mixer?.let { runCatching { it.join(1_500) } }
-        liveTranscriber?.let { runCatching { it.join(30_000) } }
+        captureDrained.set(true)
+        liveTranscriber?.let { worker ->
+            runCatching { worker.join(8_000) }
+            if (worker.isAlive) {
+                worker.interrupt()
+                liveCloud?.cancel()
+                runCatching { worker.join(2_000) }
+            }
+        }
         records.forEach { runCatching { it.release() } }
         records.clear()
         readers.clear()
@@ -325,8 +351,7 @@ class RecordingService : Service() {
 
         val file = outputFile
         if (save && file != null && file.exists() && file.length() > 44) {
-            val createdAt = startedAt
-            val duration = (System.currentTimeMillis() - createdAt).coerceAtLeast(0)
+            val duration = recordedSamples.get() * 1_000 / SAMPLE_RATE
             MeetingStore(this).update(meetingId) { meeting ->
                 meeting.copy(
                     durationMs = duration,
@@ -339,6 +364,24 @@ class RecordingService : Service() {
             file?.parentFile?.deleteRecursively()
         }
         broadcastState(false)
+        val settings = captureSettings
+        val current = MeetingStore(this).get(meetingId)
+        if (save && settings.autoMinutes && settings.hasLlm && current?.transcript?.isNotBlank() == true) {
+            processing = true
+            broadcastState(false)
+            runCatching {
+                val store = MeetingStore(this)
+                val cloud = CloudClient(this) { usage -> store.update(meetingId) { it.withUsage(usage) } }
+                val minutes = runBlocking { cloud.createMinutes(current, settings) }
+                store.update(meetingId) { it.copy(minutes = minutes) }
+            }.onFailure {
+                processing = false
+                broadcastState(false, "纪要生成失败，录音和转写已保留 / Minutes failed: ${it.message}")
+            }
+            processing = false
+            broadcastState(false)
+            sendBroadcast(Intent(ACTION_SEGMENT).setPackage(packageName).putExtra(EXTRA_MEETING_ID, meetingId))
+        }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -388,12 +431,21 @@ class RecordingService : Service() {
     }
 
     private fun broadcastState(isRecording: Boolean, error: String? = null, level: Float? = null) {
+        if (error != null) {
+            val now = System.currentTimeMillis()
+            if (error == lastError && now - lastErrorAt < 30_000) return
+            lastError = error; lastErrorAt = now
+        }
         val intent = Intent(ACTION_STATE)
             .setPackage(packageName)
             .putExtra(EXTRA_IS_RECORDING, isRecording)
             .putExtra(EXTRA_IS_PAUSED, paused.get())
             .putExtra(EXTRA_ERROR, error)
+            .putExtra(EXTRA_MEETING_ID, meetingId)
+            .putExtra(EXTRA_DURATION, recordedSamples.get() * 1_000 / SAMPLE_RATE)
+            .putExtra(EXTRA_PROCESSING, processing)
         if (level != null) intent.putExtra(EXTRA_LEVEL, level)
+        latestState = Intent(intent)
         sendBroadcast(intent)
     }
 
@@ -409,6 +461,10 @@ class RecordingService : Service() {
         const val ACTION_RESUME = "app.babelecho.android.action.RESUME"
         const val ACTION_STATE = "app.babelecho.android.action.STATE"
         const val ACTION_SEGMENT = "app.babelecho.android.action.SEGMENT"
+        @Volatile private var latestState: Intent? = null
+        fun snapshot(): Intent? = latestState?.let { Intent(it) }
+        const val EXTRA_DURATION = "duration_ms"
+        const val EXTRA_PROCESSING = "processing"
         const val EXTRA_MICROPHONE = "microphone"
         const val EXTRA_PLAYBACK = "playback"
         const val EXTRA_RESULT_CODE = "result_code"

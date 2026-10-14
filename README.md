@@ -7,7 +7,7 @@
 
 Babel Echo Android is a native meeting recorder and assistant based on the desktop workspace. It combines live capture, transcription, summaries, structured minutes, translation, meeting Q&A, and Markdown sharing in a mobile interface.
 
-**当前测试版 / Current alpha: `0.2.0-alpha.4`**
+**当前测试版 / Current alpha: `0.2.0-alpha.6`**
 
 ## 主要功能 / Features
 
@@ -41,13 +41,17 @@ Babel Echo Android is a native meeting recorder and assistant based on the deskt
 2. 选择麦克风、系统声音或两者，点击“开始录音”。
 3. 使用系统声音时，按 Android 系统页面授权屏幕/媒体捕获。
 4. 在工作区切换转写、摘要、纪要、问答和统计；结束后可从历史记录重新打开。
-5. 使用分享按钮导出 Markdown 文本。
+5. 回放录音，点击转写时间戳跳转；点击说话人名称可以统一改名。
+6. 在“统计”导出 MD、TXT、VTT、双语 VTT、JSON 或 WAV；也可分享 Markdown 文字。
+7. 可从工作台导入音频或视频；默认本地处理，按需勾选转写和纪要。
+
+实时转写默认关闭，可先不配模型测试本地录音。多服务配置可按中文、日文、英文、自动语言指定 ASR，并给摘要、纪要、翻译、问答、说话人分别选择文本服务和模型。MiMo 要求明确选择中文或英文；日语请路由到已配置的其他支持服务。界面随系统切换浅色与深色。
 
 1. Configure ASR and text endpoints, model IDs, and keys in Settings. Enable no-key mode for compatible local services.
 2. Select microphone, device audio, or both, then start recording.
 3. Grant Android's media capture consent when device audio is enabled.
 4. Use the Transcript, Summary, Minutes, Ask, and Stats tabs during or after the meeting.
-5. Share the meeting as Markdown text.
+5. Play and seek saved audio. Export MD/TXT/VTT/bilingual VTT/JSON/WAV from Stats, or share Markdown text. Import audio/video locally from Workspace; model processing is opt-in.
 
 局域网模型可填写 OpenAI 兼容地址。Android 模拟器访问宿主机时通常使用 `http://10.0.2.2:端口/v1`，并需要开启“允许 HTTP”。请只连接可信局域网。
 
@@ -86,3 +90,5 @@ The APK is written to `app/build/outputs/apk/debug/app-debug.apk`. GitHub Action
 Obtain participant consent before recording and follow applicable laws, workplace policies, and meeting platform terms. The repository contains no API keys, recordings, or meeting data. See [PRIVACY.md](PRIVACY.md) for data handling and [SECURITY.md](SECURITY.md) for security reporting.
 
 Source code is licensed under Apache License 2.0. The Babel Echo name and artwork are not granted for unrelated commercial branding by the software license.
+
+朋友测试步骤及本次验证记录见 [TESTING-alpha.6.md](TESTING-alpha.6.md)。

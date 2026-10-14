@@ -35,4 +35,7 @@ data class MeetingStats(
     val llmCalls: Int = 0,
     val audioSeconds: Long = 0,
     val transcriptChars: Int = 0,
+    val asrSeconds: Double = 0.0,
+    val inputTokens: Long = 0,
+    val outputTokens: Long = 0,
 )

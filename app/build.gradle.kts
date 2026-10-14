@@ -11,8 +11,9 @@ android {
         applicationId = "app.babelecho.android"
         minSdk = 29
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.2.0-alpha.4"
+        versionCode = 6
+        versionName = "0.2.0-alpha.6"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildFeatures {
@@ -46,4 +47,9 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.okhttp)
     debugImplementation(libs.androidx.compose.ui.tooling)
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
+    testImplementation("com.squareup.okhttp3:mockwebserver:5.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }

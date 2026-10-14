@@ -313,4 +313,76 @@ class CoreRegressionTest {
         segmenter.append(ShortArray(120000))
         assertNull(segmenter.finish())
     }
+
+    @Test fun legacyEndpointsKeysTaskModelsAndThinkingSurviveProviderMigration() {
+        val old = AppSettings(asrBaseUrl = "https://fixture.example/asr/v1", asrApiKey = "fixture-asr", asrModel = "custom-whisper", asrLanguage = "pt",
+            llmBaseUrl = "https://fixture.example/text/v1", llmApiKey = "fixture-text", llmModel = "fallback", summaryModel = "custom-summary", minutesModel = "custom-minutes", translateModel = "", askModel = "custom-ask", textThinking = emptyMap())
+        val migrated = ProviderMigration.upgrade(old)
+        assertTrue(migrated.useAsrProfiles && migrated.useTextProfiles)
+        assertEquals(old.asrBaseUrl, migrated.forAsr().asrBaseUrl); assertEquals(old.asrApiKey, migrated.forAsr().asrApiKey)
+        assertEquals(old.asrModel, migrated.forAsr().asrModel)
+        val summary = migrated.forText("summary", "")
+        assertEquals(old.llmBaseUrl, summary.first.llmBaseUrl); assertEquals(old.llmApiKey, summary.first.llmApiKey)
+        assertEquals("custom-summary", summary.second); assertNull(summary.first.textThinking["summary"])
+        assertEquals("custom-minutes", migrated.forText("minutes", "").second)
+        assertEquals("fallback", migrated.forText("translation", "").second)
+        assertEquals(migrated, ProviderMigration.upgrade(migrated))
+    }
+
+    @Test fun migrationKeepsInactiveProviderCredentialsAndNeverEnablesUnconfiguredServices() {
+        val configuredLater = ProviderDefaults.asr().map { if (it.id == "groq") it.copy(apiKey = "fixture-inactive", model = "inactive-model", label = "Future provider") else it }
+        val old = AppSettings(asrApiKey = "fixture-active", asrProfiles = configuredLater,
+            textProfiles = ProviderDefaults.text().map { if (it.id == "deepseek") it.copy(apiKey = "fixture-inactive-text") else it })
+        val next = ProviderMigration.upgrade(old)
+        assertEquals("fixture-active", next.forAsr().asrApiKey)
+        assertEquals(configuredLater.first(), next.asrProfiles.first { it.id == "groq" })
+        assertEquals("fixture-inactive-text", next.textProfiles.first { it.id == "deepseek" }.apiKey)
+        val fresh = ProviderMigration.upgrade(AppSettings(), fresh = true)
+        assertFalse(fresh.hasAsr); assertFalse(fresh.hasLlm)
+        assertFalse(fresh.asrProfiles.any { it.enabled }); assertFalse(fresh.textProfiles.any { it.enabled })
+        assertFalse(fresh.liveTranscription); assertFalse(fresh.allowInsecureHttp)
+    }
+
+    @Test fun freshCloudSetupNeedsOnlyTwoKeysAndUsesDesktopIosTaskPresets() {
+        val fresh = ProviderMigration.upgrade(AppSettings(), fresh = true)
+        val ready = fresh.copy(asrProfiles = fresh.asrProfiles.map { if (it.id == "groq") it.copy(apiKey = "fixture-asr", enabled = true) else it },
+            textProfiles = fresh.textProfiles.map { if (it.id == "deepseek") it.copy(apiKey = "fixture-text", enabled = true) else it })
+        assertTrue(ready.hasAsr && ready.hasLlm)
+        assertEquals("whisper-large-v3-turbo", ready.forAsr().asrModel)
+        assertEquals("deepseek-flash", ready.forText("summary", "").second)
+        assertEquals("deepseek-v4-pro", ready.forText("minutes", "").second)
+        assertEquals("disabled", ready.forText("translation", "").first.textThinking["translation"])
+    }
+
+    @Test fun customProviderMetadataRoundTripsWithoutKeysOrResurrectingRemovedPresets() {
+        val asr = listOf(AsrProfile("custom-a", "openai", "https://fixture.example/v1", "typed-model", true, "fixture-secret", true, setOf("ja", "ko"), "My ASR"))
+        val text = listOf(TextProfile("custom-b", "https://fixture.example/text/v1", true, "fixture-secret-text", false, "My text service"))
+        val asrJson = ProviderJson.asr(asr); val textJson = ProviderJson.text(text)
+        assertFalse(asrJson.contains("fixture-secret")); assertFalse(textJson.contains("fixture-secret-text"))
+        assertEquals(asr, ProviderJson.readAsr(asrJson) { "fixture-secret" })
+        assertEquals(text, ProviderJson.readText(textJson) { "fixture-secret-text" })
+        assertTrue(ProviderJson.readAsr("[]") { "" }.isEmpty())
+        assertTrue(ProviderJson.readText("[]") { "" }.isEmpty())
+        assertEquals(ProviderDefaults.asr().first().languages, ProviderJson.readAsr("""[{"id":"groq"}]""") { "" }.single().languages)
+    }
+
+    @Test fun catalogRejectsDuplicateUnsafeIdsAndKeepsMimoLanguageRestrictions() {
+        assertTrue(runCatching { ProviderDefaults.validateCatalog(AppSettings(textProfiles = listOf(TextProfile("same", ""), TextProfile("same", "")))) }.isFailure)
+        assertTrue(runCatching { ProviderDefaults.validateCatalog(AppSettings(textProfiles = listOf(TextProfile("../../key", "")))) }.isFailure)
+        val mimo = ProviderDefaults.asr().first { it.id == "mimo" }
+        assertFalse(mimo.supports("auto")); assertFalse(mimo.supports("ja")); assertTrue(mimo.supports("zh"))
+        assertTrue(ProviderDefaults.asr().first { it.id == "groq" }.supports("ko"))
+    }
+
+    @Test fun clearingOrRemovingMigratedKeysAlsoClearsTheirLegacyCopy() {
+        val upgraded = ProviderMigration.upgrade(AppSettings(asrApiKey = "fixture-asr", llmApiKey = "fixture-text"))
+        val asr = upgraded.asrProfiles.first { it.id == upgraded.asrRoutes.getValue("auto") }
+        val text = upgraded.textProfiles.first { it.id == upgraded.textRoles.getValue("summary").provider }
+        val cleared = upgraded.withAsrProfile(asr.copy(apiKey = "")).withTextProfile(text.copy(apiKey = ""))
+        assertTrue(cleared.asrApiKey.isBlank() && cleared.llmApiKey.isBlank())
+        assertTrue(upgraded.removeAsrProfile(asr.id).asrApiKey.isBlank())
+        assertTrue(upgraded.removeTextProfile(text.id).llmApiKey.isBlank())
+        assertFalse(upgraded.removeAsrProfile(asr.id).hasAsr)
+        assertFalse(upgraded.removeTextProfile(text.id).hasText("summary"))
+    }
 }

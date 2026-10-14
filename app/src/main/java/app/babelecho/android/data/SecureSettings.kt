@@ -15,7 +15,7 @@ import javax.crypto.spec.GCMParameterSpec
 class SecureSettings(context: Context) {
     private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
-    fun load(): AppSettings = AppSettings(
+    fun load(): AppSettings = ProviderMigration.upgrade(AppSettings(
         uiLanguage = prefs.getString("ui_language", null) ?: "zh",
         asrBaseUrl = prefs.getString("asr_base_url", null) ?: AppSettings().asrBaseUrl,
         asrModel = prefs.getString("asr_model", null) ?: AppSettings().asrModel,
@@ -46,7 +46,8 @@ class SecureSettings(context: Context) {
         priceCurrency = prefs.getString("price_currency", "USD") ?: "USD",
         useAsrProfiles = prefs.getBoolean("use_asr_profiles", false),
         asrProfiles = readAsrProfiles(),
-        asrRoutes = ProviderDefaults.routes().mapValues { (language, default) -> prefs.getString("asr_route_$language", default) ?: default },
+        asrRoutes = ProviderDefaults.routes() + prefs.all.entries.filter { it.key.startsWith("asr_route_") }
+            .associate { it.key.removePrefix("asr_route_") to (it.value as? String).orEmpty() },
         useTextProfiles = prefs.getBoolean("use_text_profiles", false),
         textProfiles = readTextProfiles(),
         textRoles = ProviderDefaults.roles().mapValues { (task, default) -> TextRole(prefs.getString("role_provider_$task", default.provider) ?: default.provider,
@@ -55,7 +56,7 @@ class SecureSettings(context: Context) {
         textThinking = ProviderDefaults.roles().mapValues { (task, default) ->
             prefs.getString("thinking_$task", if (prefs.contains("llm_base_url")) null else default.thinking)
         },
-    )
+    ), fresh = !prefs.contains("asr_base_url") && !prefs.contains("llm_base_url"))
 
     fun save(value: AppSettings) {
         require(value.chunkSeconds in 10..120) { "Chunk duration must be 10–120 seconds" }
@@ -68,8 +69,7 @@ class SecureSettings(context: Context) {
         require(listOf(value.asrPricePerHour, value.inputPricePerMillion, value.outputPricePerMillion).all { it.isFinite() && it >= 0 }) { "Prices must be finite and non-negative" }
         require(value.priceCurrency in setOf("USD", "CNY", "JPY")) { "Unsupported price currency" }
         require(value.autoSummarySeconds == 0 || value.autoSummarySeconds in 60..1_800) { "Auto summary must be off or 60–1800 seconds" }
-        require(value.asrProfiles.map { it.id }.toSet() == ProviderDefaults.asr().map { it.id }.toSet()) { "Invalid ASR profiles" }
-        require(value.textProfiles.map { it.id }.toSet() == ProviderDefaults.text().map { it.id }.toSet()) { "Invalid text profiles" }
+        ProviderDefaults.validateCatalog(value)
         require((value.textRoles.values.map { it.thinking } + value.textThinking.values).all { it == null || it in setOf("default", "enabled", "disabled") }) { "Unknown thinking mode" }
         val editor = prefs.edit()
             .putString("ui_language", value.uiLanguage)
@@ -101,19 +101,20 @@ class SecureSettings(context: Context) {
             .putString("output_price_million", value.outputPricePerMillion.toString())
             .putString("price_currency", value.priceCurrency)
         editor.putBoolean("use_asr_profiles", value.useAsrProfiles).putBoolean("use_text_profiles", value.useTextProfiles)
-        editor.putString("asr_profiles", JSONArray().apply {
+        editor.putString("asr_profiles", ProviderJson.asr(value.asrProfiles))
+        run {
             value.asrProfiles.forEach { profile ->
-                put(JSONObject().put("id", profile.id).put("kind", profile.kind).put("url", profile.baseUrl.trim().trimEnd('/'))
-                    .put("model", profile.model.trim()).put("enabled", profile.enabled).put("noAuth", profile.noAuth))
                 editor.putString("asr_profile_${profile.id}_key", encrypt(profile.apiKey.trim()))
             }
-        }.toString())
-        editor.putString("text_profiles", JSONArray().apply {
+        }
+        editor.putString("text_profiles", ProviderJson.text(value.textProfiles))
+        run {
             value.textProfiles.forEach { profile ->
-                put(JSONObject().put("id", profile.id).put("url", profile.baseUrl.trim().trimEnd('/')).put("enabled", profile.enabled).put("noAuth", profile.noAuth))
                 editor.putString("text_profile_${profile.id}_key", encrypt(profile.apiKey.trim()))
             }
-        }.toString())
+        }
+        val activeKeys = value.asrProfiles.map { "asr_profile_${it.id}_key" } + value.textProfiles.map { "text_profile_${it.id}_key" }
+        prefs.all.keys.filter { (it.startsWith("asr_profile_") || it.startsWith("text_profile_")) && it.endsWith("_key") && it !in activeKeys }.forEach(editor::remove)
         value.asrRoutes.forEach { (language, provider) -> editor.putString("asr_route_$language", provider) }
         value.textRoles.forEach { (task, role) -> editor.putString("role_provider_$task", role.provider).putString("role_model_$task", role.model.trim()).putString("role_thinking_$task", role.thinking) }
         ProviderDefaults.roles().keys.forEach { task -> editor.putString("thinking_$task", value.textThinking[task]) }
@@ -121,21 +122,13 @@ class SecureSettings(context: Context) {
     }
 
     private fun readAsrProfiles(): List<AsrProfile> {
-        val array = runCatching { JSONArray(prefs.getString("asr_profiles", "[]")) }.getOrDefault(JSONArray())
-        return ProviderDefaults.asr().map { default ->
-            val item = (0 until array.length()).map { array.getJSONObject(it) }.firstOrNull { it.optString("id") == default.id }
-            if (item == null) default else default.copy(kind = item.optString("kind", default.kind), baseUrl = item.optString("url", default.baseUrl),
-                model = item.optString("model", default.model), enabled = item.optBoolean("enabled"), noAuth = item.optBoolean("noAuth"), apiKey = decrypt(prefs.getString("asr_profile_${default.id}_key", null)))
-        }
+        val raw = prefs.getString("asr_profiles", null) ?: return ProviderDefaults.asr()
+        return ProviderJson.readAsr(raw) { id -> decrypt(prefs.getString("asr_profile_${id}_key", null)) }
     }
 
     private fun readTextProfiles(): List<TextProfile> {
-        val array = runCatching { JSONArray(prefs.getString("text_profiles", "[]")) }.getOrDefault(JSONArray())
-        return ProviderDefaults.text().map { default ->
-            val item = (0 until array.length()).map { array.getJSONObject(it) }.firstOrNull { it.optString("id") == default.id }
-            if (item == null) default else default.copy(baseUrl = item.optString("url", default.baseUrl), enabled = item.optBoolean("enabled"),
-                noAuth = item.optBoolean("noAuth"), apiKey = decrypt(prefs.getString("text_profile_${default.id}_key", null)))
-        }
+        val raw = prefs.getString("text_profiles", null) ?: return ProviderDefaults.text()
+        return ProviderJson.readText(raw) { id -> decrypt(prefs.getString("text_profile_${id}_key", null)) }
     }
 
     private fun secretKey(): SecretKey {

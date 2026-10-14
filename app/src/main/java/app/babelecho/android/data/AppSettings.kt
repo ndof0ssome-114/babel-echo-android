@@ -68,4 +68,23 @@ data class AppSettings(
         settings.llmBaseUrl.isNotBlank() && (settings.llmNoAuth || settings.llmApiKey.isNotBlank()) && model.ifBlank { settings.llmModel }.isNotBlank()
     }.getOrDefault(false)
     val minutesDestination: String get() = if (useTextProfiles) textProfiles.firstOrNull { it.id == textRoles["minutes"]?.provider }?.baseUrl.orEmpty() else llmBaseUrl
+
+    fun withAsrProfile(profile: AsrProfile): AppSettings {
+        val previous = asrProfiles.firstOrNull { it.id == profile.id }
+        val matchesLegacy = previous != null && previous.baseUrl.trimEnd('/') == asrBaseUrl.trimEnd('/') && previous.apiKey == asrApiKey
+        return copy(asrProfiles = if (previous == null) asrProfiles + profile else asrProfiles.map { if (it.id == profile.id) profile else it },
+            asrApiKey = if (matchesLegacy) profile.apiKey else asrApiKey)
+    }
+    fun withTextProfile(profile: TextProfile): AppSettings {
+        val previous = textProfiles.firstOrNull { it.id == profile.id }
+        val matchesLegacy = previous != null && previous.baseUrl.trimEnd('/') == llmBaseUrl.trimEnd('/') && previous.apiKey == llmApiKey
+        return copy(textProfiles = if (previous == null) textProfiles + profile else textProfiles.map { if (it.id == profile.id) profile else it },
+            llmApiKey = if (matchesLegacy) profile.apiKey else llmApiKey)
+    }
+    fun removeAsrProfile(id: String) = asrProfiles.firstOrNull { it.id == id }?.let { profile ->
+        withAsrProfile(profile.copy(apiKey = "")).copy(asrProfiles = asrProfiles.filter { it.id != id })
+    } ?: this
+    fun removeTextProfile(id: String) = textProfiles.firstOrNull { it.id == id }?.let { profile ->
+        withTextProfile(profile.copy(apiKey = "")).copy(textProfiles = textProfiles.filter { it.id != id })
+    } ?: this
 }

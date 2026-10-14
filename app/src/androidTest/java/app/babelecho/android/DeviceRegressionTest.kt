@@ -121,6 +121,27 @@ class DeviceRegressionTest {
         }
     }
 
+    @Test fun customProvidersLanguagesRoutesAndEncryptedKeysPersistAndDeletionClearsKeys() {
+        val store = SecureSettings(context)
+        val original = store.load()
+        try {
+            val asr = AsrProfile("fixture-custom-asr", "openai", "https://fixture.example/v1", "custom-whisper", true, "fixture-custom-key", false, setOf("ko", "ja"), "Custom ASR")
+            val text = TextProfile("fixture-custom-text", "https://fixture.example/text/v1", true, "fixture-text-key", false, "Custom text")
+            val configured = original.copy(asrProfiles = original.asrProfiles + asr, textProfiles = original.textProfiles + text,
+                asrRoutes = original.asrRoutes + ("ko" to asr.id), textRoles = original.textRoles + ("minutes" to TextRole(text.id, "custom-minutes")))
+            store.save(configured)
+            val loaded = SecureSettings(context).load()
+            assertEquals(asr, loaded.asrProfiles.first { it.id == asr.id }); assertEquals(text, loaded.textProfiles.first { it.id == text.id })
+            assertEquals(asr.id, loaded.asrRoutes["ko"]); assertEquals("custom-minutes", loaded.forText("minutes", "").second)
+            val prefs = context.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE)
+            assertFalse(prefs.getString("asr_profiles", "")!!.contains(asr.apiKey))
+            assertNotEquals(asr.apiKey, prefs.getString("asr_profile_${asr.id}_key", ""))
+            store.save(original)
+            assertFalse(prefs.contains("asr_profile_${asr.id}_key")); assertFalse(prefs.contains("text_profile_${text.id}_key"))
+            assertTrue(SecureSettings(context).load().asrProfiles.none { it.id == asr.id })
+        } finally { store.save(original) }
+    }
+
     private fun createAacFixture(output: File) {
         val rate = 32_000
         val encoder = MediaCodec.createEncoderByType("audio/mp4a-latm")

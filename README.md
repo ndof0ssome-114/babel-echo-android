@@ -7,7 +7,7 @@
 
 Babel Echo Android is a native meeting recorder and assistant based on the desktop workspace. It combines live capture, transcription, summaries, structured minutes, translation, meeting Q&A, and Markdown sharing in a mobile interface.
 
-**当前测试版 / Current alpha: `0.2.0-alpha.7`**
+**当前测试版 / Current alpha: `0.2.0-alpha.8`**
 
 ## 主要功能 / Features
 
@@ -37,7 +37,7 @@ Babel Echo Android is a native meeting recorder and assistant based on the deskt
 
 ## 使用 / Getting started
 
-1. 在“设置”填写 ASR 与文本模型地址、模型 ID 和密钥；本地无鉴权服务可开启“无需密钥”。
+1. 在“设置 → 常用”选择识别和文本服务；内置云服务只需配置自己的 API Key，再点击顶部保存。模型直接下拉选择，自定义端点或本地服务在“服务选项”中修改。
 2. 选择麦克风、系统声音或两者，点击“开始录音”。
 3. 使用系统声音时，按 Android 系统页面授权屏幕/媒体捕获。
 4. 在工作区切换转写、摘要、纪要、问答和统计；结束后可从历史记录重新打开。
@@ -47,7 +47,7 @@ Babel Echo Android is a native meeting recorder and assistant based on the deskt
 
 实时转写默认关闭，可先不配模型测试本地录音。多服务配置可按中文、日文、英文、自动语言指定 ASR，并给摘要、纪要、翻译、问答、说话人分别选择文本服务和模型。MiMo 要求明确选择中文或英文；日语请路由到已配置的其他支持服务。界面随系统切换浅色与深色。
 
-1. Configure ASR and text endpoints, model IDs, and keys in Settings. Enable no-key mode for compatible local services.
+1. Choose ASR and text services in Settings → Common. Built-in cloud services need only your API keys; save at the top. Select models from dropdowns, and use Service options for custom endpoints or local services.
 2. Select microphone, device audio, or both, then start recording.
 3. Grant Android's media capture consent when device audio is enabled.
 4. Use the Transcript, Summary, Minutes, Ask, and Stats tabs during or after the meeting.
@@ -91,4 +91,4 @@ Obtain participant consent before recording and follow applicable laws, workplac
 
 Source code is licensed under Apache License 2.0. The Babel Echo name and artwork are not granted for unrelated commercial branding by the software license.
 
-alpha.7 参考 iOS 独立仓库 alpha.3，新增设置草稿跨页保留、顶部保存、模型列表与思考配置、整页复制、输出保护和静音断句。朋友测试步骤及本次验证记录见 [TESTING-alpha.7.md](TESTING-alpha.7.md)。
+alpha.8 对照 PC/Mac 和 iOS 的设置实现，改为服务预设、模型下拉和折叠任务配置。常见云服务只需配置密钥；服务地址、协议、自定义模型和费率在选项中按需展开。旧端点、模型和密钥保持兼容。朋友测试步骤及验证记录见 [TESTING-alpha.8.md](TESTING-alpha.8.md)。

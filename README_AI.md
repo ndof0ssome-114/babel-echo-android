@@ -14,7 +14,7 @@ Babel Echo Android is a native Android 10+ meeting recorder and AI meeting works
 
 It stores a local PCM WAV recording and can use user-configured OpenAI-compatible endpoints for live transcription, translation, incremental summaries, structured minutes, and meeting Q&A.
 
-Current version: `0.2.0-alpha.7` (`versionCode 7`).
+Current version: `0.2.0-alpha.8` (`versionCode 8`).
 
 Application ID: `app.babelecho.android`.
 
@@ -715,3 +715,15 @@ Reference: https://github.com/ndof0ssome-114/babelecho-ios at `dd7c61e6b0984d307
 - `UtteranceSegmenter` ports iOS energy-based segmentation: RMS .003, 0.3-second pre-roll, 1.2-second silence, 0.25-second minimum utterance, configured maximum chunk/overlap and bounded buffer. Timestamps include recorded silence and exclude pauses. Stop/pause flush new voice, never finalized overlap. Silence remains in WAV and is not sent in this mode. Fresh settings select utterance mode but live ASR stays off; existing `chunk_seconds` preferences retain fixed chunks until explicitly changed. No stored meetings are rewritten.
 - Recording start is reserved before permission/projection UI to reject duplicate starts; cancellation releases it. Settings cannot be saved while reserved.
 - Remaining differences: no provisional 3-second live text and no JSON minutes document (structured Markdown is supported). Global speaker identity, real providers and physical microphone/system-audio/lock-screen behavior still need validation. See [alpha.7 testing](TESTING-alpha.7.md).
+
+## 25. Alpha.8: preset-first settings from desktop/iOS (2026-10-15)
+
+Reference implementations: desktop `public/app.js` (`providerCard`, `modelPicker`, `taskModelSettings`) and `lib/config.mjs`; Windows/macOS both load this UI via `desktop/main.cjs`. Independent iOS alpha.3 `ContentView.swift` (`SettingsView`, `TaskModelEditor`) and `Models.swift` (`ProviderCatalog`, `ModelRole.initial`).
+
+- `SettingsScreen.kt` replaces the stacked legacy/profile forms with Common, Services and Advanced sections. Common contains selected ASR/text providers, credential status/actions, model dropdowns, opt-in processing and collapsed language/task routing. URL/protocol/model overrides are in Service options. Timing uses steppers and VAD uses a slider. Price fields are optional and collapsed. Interface/speech/translation languages have readable labels, including ko/fr/de/es where the selected ASR explicitly supports them.
+- Built-in endpoints/protocols/models are provided. Fresh text roles match desktop/iOS seeds (`deepseek-flash`, minutes `deepseek-v4-pro`); these are presets, not a compatibility guarantee. Existing model IDs remain selectable and unchanged. Model dropdowns always exist; editing appears only after choosing manual input. Explicit discovery adds IDs to a shared per-provider catalog without replacing selections. Endpoint/key/no-auth changes replace the owning request session, and leaving Settings cancels sessions. No models are fetched automatically.
+- `ProviderMigration.upgrade` normalizes old single-service preferences to profiles in memory. It preserves active endpoint/key/model/no-auth and task-specific IDs/thinking. Conflicting inactive provider credentials remain under their original IDs; a separate legacy provider is created for the active configuration. It is idempotent, does not write on load, and never enables an unconfigured service or changes live-ASR/HTTP opt-ins. The next explicit save persists the profiles. Legacy fields remain for compatibility.
+- New installations can select Groq and DeepSeek and configure only two keys; addresses, ASR model and task roles are prefilled. Keys are entered in masked dialogs and remain a draft until Save. Applying a key explicitly enables its provider. MiMo text may explicitly reuse a matching MiMo ASR key; this is a user action and requires the same configured endpoint. Clearing/removing a migrated key also clears its matching legacy credential copy.
+- `ProviderJson` persists only metadata, including new optional label/languages. Old arrays without those fields use defaults. Custom providers have stable validated IDs, unique within each category (up to 24); they survive restart. Removed provider encrypted-key entries are removed on Save. Routes/tasks referring to a removed service remain unconfigured until reassigned; no silent fallback. Missing/deleted providers are not recreated by decoding.
+- User-defined credentials remain separately encrypted in Keystore-backed preferences. No meetings/audio are used for configuration/discovery, and settings drafts do not serialize keys into saved-instance state.
+- Verification and concrete UI evidence are in [alpha.8 testing](TESTING-alpha.8.md). This update changes configuration UX and compatibility, not microphone/system capture behavior.

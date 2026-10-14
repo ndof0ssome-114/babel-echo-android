@@ -24,3 +24,4 @@ Debug APKs use the standard Android debug certificate and are intended only for 
 
 - No-auth ASR/text/model-list requests omit saved credentials. Explicit model discovery uses only the draft endpoint/authentication; changing those drafts invalidates late results.
 - Thinking controls are scoped to the exact official `api.deepseek.com` host. Empty or output-truncated text responses preserve existing documents, report usage first, and are not retried automatically.
+- Legacy configuration migration preserves the active endpoints/authentication/task models without contacting providers. Conflicting inactive credentials are preserved separately. Custom IDs are validated and provider JSON contains metadata only; deleting providers removes their encrypted key entries on Save.

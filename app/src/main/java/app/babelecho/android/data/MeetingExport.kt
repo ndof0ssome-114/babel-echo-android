@@ -9,6 +9,13 @@ enum class ExportFormat(val extension: String, val mime: String, val label: Stri
 }
 
 object MeetingExport {
+    fun transcript(meeting: Meeting): String = if (meeting.segments.isEmpty()) meeting.transcript else
+        meeting.segments.joinToString("\n\n") {
+            "[${timestamp(it.startMs)}] ${it.speaker}: ${it.text}" + if (it.translated.isBlank()) "" else "\n${it.translated}"
+        }
+
+    fun questions(meeting: Meeting): String = meeting.qa.joinToString("\n\n") { "Q: ${it.question}\nA: ${it.answer}" }
+
     fun text(meeting: Meeting, format: ExportFormat): String {
         val segments = meeting.segments.ifEmpty {
             if (meeting.transcript.isBlank()) emptyList() else listOf(TranscriptSegment(0, 0, meeting.durationMs, text = meeting.transcript))

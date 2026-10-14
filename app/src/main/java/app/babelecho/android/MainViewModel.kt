@@ -24,11 +24,21 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-fun Meeting.withUsage(usage: ModelUsage): Meeting = copy(stats = stats.copy(
+fun Meeting.withUsage(usage: ModelUsage): Meeting {
+    val tasks = if (usage.task.isBlank()) stats.textUsageByTask else {
+        val old = stats.textUsageByTask[usage.task] ?: TextUsage()
+        stats.textUsageByTask + (usage.task to TextUsage(old.calls + usage.llmCalls,
+            old.inputTokens + usage.inputTokens, old.outputTokens + usage.outputTokens,
+            if (old.reasoningTokens == null && usage.reasoningTokens == null) null else (old.reasoningTokens ?: 0) + (usage.reasoningTokens ?: 0),
+            old.unreportedCalls + usage.unreportedCalls))
+    }
+    return copy(stats = stats.copy(
     asrCalls = stats.asrCalls + usage.asrCalls, llmCalls = stats.llmCalls + usage.llmCalls,
     asrSeconds = stats.asrSeconds + usage.asrSeconds, inputTokens = stats.inputTokens + usage.inputTokens,
     outputTokens = stats.outputTokens + usage.outputTokens,
+    textUsageByTask = tasks,
 ))
+}
 
 data class MainUiState(
     val meetings: List<Meeting> = emptyList(), val settings: AppSettings = AppSettings(),
@@ -36,6 +46,7 @@ data class MainUiState(
     val isStopping: Boolean = false, val audioLevel: Float = 0f, val recordedDurationMs: Long = 0,
     val activeMeetingId: String? = null, val selectedMeetingId: String? = null,
     val workingMeetingId: String? = null, val message: String? = null,
+    val isSavingSettings: Boolean = false,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -43,7 +54,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val secureSettings = SecureSettings(application)
     private val _state = MutableStateFlow(MainUiState(settings = secureSettings.load()))
     val state = _state.asStateFlow()
+    private val _settingsDraft = MutableStateFlow(_state.value.settings)
+    val settingsDraft = _settingsDraft.asStateFlow()
+    fun editSettings(settings: AppSettings) { _settingsDraft.value = settings }
     private var serviceWorking = false
+    private var startReserved = false
     private val recordingReceiver = RecordingStateReceiver(::receiveRecordingState)
     private fun receiveRecordingState(intent: Intent?) {
             if (intent?.action == RecordingService.ACTION_SEGMENT) { refresh(); return }
@@ -94,8 +109,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun reserveRecordingStart(): Boolean {
+        if (_state.value.isRecording || _state.value.isStarting || _state.value.isStopping || _state.value.isSavingSettings || _state.value.workingMeetingId != null) return false
+        startReserved = true
+        _state.value = _state.value.copy(isStarting = true, message = null)
+        return true
+    }
+
+    fun cancelRecordingStart(message: String) {
+        if (startReserved) {
+            startReserved = false
+            _state.value = _state.value.copy(isStarting = false, message = message)
+        }
+    }
+
     fun startRecording(resultCode: Int, resultData: Intent?, microphone: Boolean, playback: Boolean) {
-        if (_state.value.isRecording || _state.value.isStarting || _state.value.workingMeetingId != null) return
+        if (!startReserved && !reserveRecordingStart()) return
+        startReserved = false
         val context = getApplication<Application>()
         val intent = Intent(context, RecordingService::class.java).setAction(RecordingService.ACTION_START)
             .putExtra(RecordingService.EXTRA_MICROPHONE, microphone).putExtra(RecordingService.EXTRA_PLAYBACK, playback)
@@ -124,10 +154,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun clearMessage() { _state.value = _state.value.copy(message = null) }
 
     fun saveSettings(settings: AppSettings) {
+        if (_state.value.isSavingSettings || _state.value.isRecording || _state.value.isStarting || _state.value.isStopping || _state.value.workingMeetingId != null) return
+        _state.value = _state.value.copy(isSavingSettings = true)
         viewModelScope.launch {
             runCatching { withContext(Dispatchers.IO) { secureSettings.save(settings); secureSettings.load() } }
-                .onSuccess { _state.value = _state.value.copy(settings = it, message = when (it.uiLanguage) { "ja" -> "設定を保存しました"; "en" -> "Settings saved"; else -> "设置已保存" }) }
+                .onSuccess { if (_settingsDraft.value == settings) _settingsDraft.value = it
+                    _state.value = _state.value.copy(settings = it, message = when (it.uiLanguage) { "ja" -> "設定を保存しました"; "en" -> "Settings saved"; else -> "设置已保存" }) }
                 .onFailure { showMessage(it.message ?: "Cannot save settings") }
+            _state.value = _state.value.copy(isSavingSettings = false)
         }
     }
 
@@ -136,13 +170,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun transcribe(meeting: Meeting) = launchMeetingWork(meeting.id) {
         val segments = cloud(meeting.id).transcribeSegments(File(meeting.audioPath), _state.value.settings)
         store.update(meeting.id) { it.copy(transcript = segments.joinToString("\n") { segment -> segment.text },
-            summary = "", minutes = "", qa = emptyList(), segments = segments,
+            summary = "", summaryUpTo = 0, minutes = "", qa = emptyList(), segments = segments,
             stats = it.stats.copy(transcriptChars = segments.sumOf { segment -> segment.text.length })) }
     }
 
     fun summarize(meeting: Meeting) = launchMeetingWork(meeting.id) {
         val summary = cloud(meeting.id).summarize(meeting.transcript, _state.value.settings)
-        store.update(meeting.id) { it.copy(summary = summary) }
+        store.update(meeting.id) { it.copy(summary = summary, summaryUpTo = meeting.segments.size) }
     }
 
     fun createMinutes(meeting: Meeting) = launchMeetingWork(meeting.id) {
@@ -225,7 +259,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun launchMeetingWork(id: String, block: suspend () -> Unit) {
-        if (_state.value.workingMeetingId != null || _state.value.isRecording || _state.value.isStarting || _state.value.isStopping) return
+        if (_state.value.workingMeetingId != null || _state.value.isRecording || _state.value.isStarting || _state.value.isStopping || _state.value.isSavingSettings) return
         _state.value = _state.value.copy(workingMeetingId = id, message = null)
         viewModelScope.launch {
             runCatching { withContext(Dispatchers.IO) { block() } }

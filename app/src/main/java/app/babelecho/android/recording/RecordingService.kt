@@ -78,6 +78,7 @@ class RecordingService : Service() {
             ACTION_STOP -> thread(name = "babel-stop") { stopCapture(save = true) }
             ACTION_PAUSE -> if (running.get() && !stopping.get()) {
                 paused.set(true)
+                if (captureSettings.liveUtterances) liveQueue.offer(ShortArray(0))
                 broadcastState(true)
             }
             ACTION_RESUME -> if (running.get() && !stopping.get()) {
@@ -258,20 +259,21 @@ class RecordingService : Service() {
         val cloud = CloudClient(this) { usage -> store.update(meetingId) { it.withUsage(usage) } }
         liveCloud = cloud
         val accumulator = PcmAccumulator()
+        val utterances = if (settings.liveUtterances) UtteranceSegmenter(SAMPLE_RATE, settings.chunkSeconds,
+            settings.overlapSeconds.toDouble(), settings.vadThreshold) else null
         val windowSamples = settings.chunkSeconds * SAMPLE_RATE
         val overlapSamples = settings.overlapSeconds * SAMPLE_RATE
         var windowStartSamples = 0L
         var previousTail = ""
         var lastSummaryAt = System.currentTimeMillis()
-        var summarizedSegments = 0
 
-        fun process(samples: ShortArray) {
+        fun process(samples: ShortArray, startSample: Long = windowStartSamples) {
             val temp = File(cacheDir, "live-$meetingId-${System.nanoTime()}.wav")
             try {
                 WavFileWriter(temp, SAMPLE_RATE).use { it.write(samples) }
                 val received = runBlocking { cloud.transcribeResult(temp, settings, previousTail) }
                 if (Thread.currentThread().isInterrupted) return
-                val startMs = windowStartSamples * 1_000 / SAMPLE_RATE
+                val startMs = startSample * 1_000 / SAMPLE_RATE
                 val currentMeeting = store.get(meetingId) ?: return
                 var tail = previousTail
                 val additions = received.mapNotNull { item ->
@@ -296,14 +298,14 @@ class RecordingService : Service() {
                 val current = store.get(meetingId) ?: return
                 val due = settings.hasText("summary") && settings.autoSummarySeconds > 0 &&
                     System.currentTimeMillis() - lastSummaryAt >= settings.autoSummarySeconds * 1_000L &&
-                    current.segments.size > summarizedSegments
+                    current.segments.size > current.summaryUpTo
                 if (due) {
-                    val newSegments = current.segments.drop(summarizedSegments)
+                    val upTo = current.segments.size
+                    val newSegments = current.segments.drop(current.summaryUpTo)
                     val summary = runBlocking { cloud.updateSummary(current.summary, newSegments, settings) }
                     store.update(meetingId) { meeting ->
-                        meeting.copy(summary = summary)
+                        meeting.copy(summary = summary, summaryUpTo = upTo)
                     }
-                    summarizedSegments = current.segments.size
                     lastSummaryAt = System.currentTimeMillis()
                     sendBroadcast(Intent(ACTION_SEGMENT).setPackage(packageName).putExtra(EXTRA_MEETING_ID, meetingId))
                 }
@@ -317,13 +319,21 @@ class RecordingService : Service() {
 
         while ((!captureDrained.get() || liveQueue.isNotEmpty()) && !Thread.currentThread().isInterrupted) {
             val chunk = try { liveQueue.poll(200, TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); break } ?: continue
+            if (utterances != null) {
+                val ready = if (chunk.isEmpty()) listOfNotNull(utterances.finish()) else utterances.append(chunk)
+                ready.forEach { if (!Thread.currentThread().isInterrupted) process(it.samples, it.startSample) }
+                continue
+            }
             accumulator.add(chunk)
             while (accumulator.size >= windowSamples) {
                 process(accumulator.take(windowSamples, overlapSamples))
                 windowStartSamples += (windowSamples - overlapSamples).toLong()
             }
         }
-        if (!Thread.currentThread().isInterrupted && accumulator.size > overlapSamples) process(accumulator.take(accumulator.size, 0))
+        if (!Thread.currentThread().isInterrupted) {
+            if (utterances != null) utterances.finish()?.let { process(it.samples, it.startSample) }
+            else if (accumulator.size > overlapSamples) process(accumulator.take(accumulator.size, 0))
+        }
     }
 
     private fun stopCapture(save: Boolean) {

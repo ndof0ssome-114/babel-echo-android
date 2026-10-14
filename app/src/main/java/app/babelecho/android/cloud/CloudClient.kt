@@ -4,6 +4,7 @@ import android.content.Context
 import app.babelecho.android.data.AppSettings
 import app.babelecho.android.data.Meeting
 import app.babelecho.android.data.TranscriptSegment
+import app.babelecho.android.data.TextModelPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -19,7 +20,9 @@ import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.TimeUnit
 
-data class ModelUsage(val asrCalls: Int = 0, val llmCalls: Int = 0, val asrSeconds: Double = 0.0, val inputTokens: Long = 0, val outputTokens: Long = 0)
+data class ModelUsage(val asrCalls: Int = 0, val llmCalls: Int = 0, val asrSeconds: Double = 0.0,
+    val inputTokens: Long = 0, val outputTokens: Long = 0, val reasoningTokens: Long? = null,
+    val task: String = "", val unreportedCalls: Int = 0)
 
 class CloudClient(private val cacheDirectory: File, private val onUsage: (ModelUsage) -> Unit = {}) {
     constructor(context: Context, onUsage: (ModelUsage) -> Unit = {}) : this(context.cacheDir, onUsage)
@@ -33,6 +36,19 @@ class CloudClient(private val cacheDirectory: File, private val onUsage: (ModelU
         .build()
 
     fun cancel() { client.dispatcher.cancelAll() }
+
+    suspend fun discoverModels(baseUrl: String, apiKey: String, noAuth: Boolean, allowInsecure: Boolean): List<String> = withContext(Dispatchers.IO) {
+        require(noAuth || apiKey.isNotBlank()) { "Enter this provider's API key or select no API key" }
+        validateUrl(baseUrl, allowInsecure, "Model list")
+        val request = Request.Builder().url(endpoint(baseUrl, "models"))
+            .apply { if (!noAuth) header("Authorization", "Bearer ${apiKey.trim()}") }.build()
+        val json = JSONObject(client.newBuilder().callTimeout(30, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
+            .newCall(request).execute().use { readResponse(it, request) })
+        val items = json.optJSONArray("data") ?: error("No compatible model list; enter a model ID manually")
+        val models = (0 until items.length()).mapNotNull { items.optJSONObject(it)?.optString("id")?.trim()?.takeIf(String::isNotBlank) }.distinct().sorted()
+        require(models.isNotEmpty()) { "No models returned; enter a model ID manually" }
+        models
+    }
 
     suspend fun transcribe(audio: File, settings: AppSettings): String =
         transcribeSegments(audio, settings).joinToString("\n") { it.text }
@@ -78,7 +94,7 @@ class CloudClient(private val cacheDirectory: File, private val onUsage: (ModelU
                     .apply { if (settings.asrLanguage != "auto") addQueryParameter("language", settings.asrLanguage) }
                     .build()
                 JSONObject(execute(Request.Builder().url(url).post(audio.asRequestBody("audio/wav".toMediaType()))
-                    .apply { if (settings.asrApiKey.isNotBlank()) header("Authorization", "Token ${settings.asrApiKey}") }.build()))
+                    .apply { if (!settings.asrNoAuth && settings.asrApiKey.isNotBlank()) header("Authorization", "Token ${settings.asrApiKey.trim()}") }.build()))
             }
             "mimo" -> {
                 val content = JSONObject().put("type", "input_audio").put("input_audio", JSONObject().put("data", "data:audio/wav;base64," + Base64.getEncoder().encodeToString(audio.readBytes())))
@@ -87,7 +103,7 @@ class CloudClient(private val cacheDirectory: File, private val onUsage: (ModelU
                     .put("asr_options", JSONObject().put("language", settings.asrLanguage))
                 JSONObject(execute(Request.Builder().url(endpoint(settings.asrBaseUrl, "chat/completions"))
                     .post(body.toString().toRequestBody("application/json".toMediaType()))
-                    .apply { if (settings.asrApiKey.isNotBlank()) header("Authorization", "Bearer ${settings.asrApiKey}") }.build()))
+                    .apply { if (!settings.asrNoAuth && settings.asrApiKey.isNotBlank()) header("Authorization", "Bearer ${settings.asrApiKey.trim()}") }.build()))
             }
             else -> {
                 val builder = MultipartBody.Builder().setType(MultipartBody.FORM)
@@ -96,7 +112,7 @@ class CloudClient(private val cacheDirectory: File, private val onUsage: (ModelU
                 if (settings.asrLanguage != "auto") builder.addFormDataPart("language", settings.asrLanguage)
                 if (prompt.isNotBlank()) builder.addFormDataPart("prompt", prompt.takeLast(240))
                 JSONObject(execute(Request.Builder().url(endpoint(settings.asrBaseUrl, "audio/transcriptions"))
-                    .post(builder.build()).apply { if (settings.asrApiKey.isNotBlank()) header("Authorization", "Bearer ${settings.asrApiKey}") }.build()))
+                    .post(builder.build()).apply { if (!settings.asrNoAuth && settings.asrApiKey.isNotBlank()) header("Authorization", "Bearer ${settings.asrApiKey.trim()}") }.build()))
             }
         }
         val parsed = parseAsr(json, settings.asrKind, duration)
@@ -231,6 +247,13 @@ class CloudClient(private val cacheDirectory: File, private val onUsage: (ModelU
         val body = JSONObject()
             .put("model", selectedModel)
             .put("temperature", 0.2)
+            .put("max_tokens", TextModelPolicy.outputLimit(settings.llmBaseUrl, task, settings.textThinking[task]))
+            .apply {
+                val thinking = settings.textThinking[task]
+                if (TextModelPolicy.isDeepSeek(settings.llmBaseUrl) && thinking in setOf("enabled", "disabled")) {
+                    put("thinking", JSONObject().put("type", thinking))
+                }
+            }
             .put(
                 "messages",
                 JSONArray()
@@ -243,22 +266,26 @@ class CloudClient(private val cacheDirectory: File, private val onUsage: (ModelU
             .url(endpoint(settings.llmBaseUrl, "chat/completions"))
             .post(body)
             .apply {
-                if (settings.llmApiKey.isNotBlank()) header("Authorization", "Bearer ${settings.llmApiKey}")
+                if (!settings.llmNoAuth && settings.llmApiKey.isNotBlank()) header("Authorization", "Bearer ${settings.llmApiKey.trim()}")
             }
             .build()
         val json = JSONObject(execute(request))
-        val content = json.getJSONArray("choices")
-            .getJSONObject(0)
-            .getJSONObject("message")
-            .getString("content")
-            .trim()
-        require(content.isNotBlank()) { "Text model returned empty content" }
         val usage = json.optJSONObject("usage")
-        onUsage(ModelUsage(llmCalls = 1, inputTokens = usage?.optLong("prompt_tokens") ?: 0, outputTokens = usage?.optLong("completion_tokens") ?: 0))
-        return content
+        val details = usage?.optJSONObject("completion_tokens_details")
+        onUsage(ModelUsage(llmCalls = 1, inputTokens = (usage?.optLong("prompt_tokens") ?: 0).coerceAtLeast(0),
+            outputTokens = (usage?.optLong("completion_tokens") ?: 0).coerceAtLeast(0),
+            reasoningTokens = if (details?.has("reasoning_tokens") == true && !details.isNull("reasoning_tokens")) details.optLong("reasoning_tokens").coerceAtLeast(0) else null,
+            task = task, unreportedCalls = if (usage == null || !usage.has("prompt_tokens") || !usage.has("completion_tokens") || usage.isNull("prompt_tokens") || usage.isNull("completion_tokens")) 1 else 0))
+        val choice = json.optJSONArray("choices")?.optJSONObject(0)
+        val content = choice?.optJSONObject("message")?.opt("content") as? String
+        require(!content.isNullOrBlank()) { "Text model returned no content. Check the model and thinking mode; usage saved and previous content preserved" }
+        require(choice.optString("finish_reason") != "length") { "Text model reached its output limit; usage saved and previous content preserved" }
+        return content.trim()
     }
 
-    private fun execute(request: Request): String = client.newCall(request).execute().use { response ->
+    private fun execute(request: Request): String = client.newCall(request).execute().use { response -> readResponse(response, request) }
+
+    private fun readResponse(response: okhttp3.Response, request: Request): String {
         val text = response.body.string()
         if (!response.isSuccessful) {
             val message = runCatching {
@@ -268,7 +295,7 @@ class CloudClient(private val cacheDirectory: File, private val onUsage: (ModelU
             val safe = if (secret.isBlank()) message else message.replace(secret, "[redacted]")
             error("HTTP ${response.code}: $safe")
         }
-        text
+        return text
     }
 
     private fun endpoint(baseUrl: String, path: String): String = "${baseUrl.trimEnd('/')}/$path"

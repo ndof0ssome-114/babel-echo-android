@@ -21,3 +21,6 @@ Only the latest prerelease receives fixes during the alpha period.
 - Imports use the system document picker. Export destinations are explicitly selected by the user. No broad storage permission is required.
 
 Debug APKs use the standard Android debug certificate and are intended only for testing.
+
+- No-auth ASR/text/model-list requests omit saved credentials. Explicit model discovery uses only the draft endpoint/authentication; changing those drafts invalidates late results.
+- Thinking controls are scoped to the exact official `api.deepseek.com` host. Empty or output-truncated text responses preserve existing documents, report usage first, and are not retried automatically.

@@ -47,6 +47,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import app.babelecho.android.cloud.CloudClient
+import app.babelecho.android.data.TextModelPolicy
+import kotlinx.coroutines.launch
 import app.babelecho.android.data.TextRole
 import app.babelecho.android.data.AsrProfile
 import app.babelecho.android.data.TextProfile
@@ -86,6 +89,7 @@ private val Danger = Color(0xFFCF5160)
 private fun BabelEchoApp(viewModel: MainViewModel) {
     val context = LocalContext.current
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val settingsDraft by viewModel.settingsDraft.collectAsStateWithLifecycle()
     val lang = state.settings.uiLanguage
     val snackbar = remember { SnackbarHostState() }
     var page by rememberSaveable { mutableStateOf(AppPage.Workspace) }
@@ -108,7 +112,7 @@ private fun BabelEchoApp(viewModel: MainViewModel) {
     val projectionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
             viewModel.startRecording(result.resultCode, result.data, pendingMicrophone, pendingPlayback)
-        } else viewModel.showMessage(tr(lang, "系统声音授权已取消", "システム音声の許可がキャンセルされました", "System audio consent was cancelled"))
+        } else viewModel.cancelRecordingStart(tr(lang, "系统声音授权已取消", "システム音声の許可がキャンセルされました", "System audio consent was cancelled"))
     }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
         val audioAllowed = grants[Manifest.permission.RECORD_AUDIO] == true ||
@@ -116,10 +120,11 @@ private fun BabelEchoApp(viewModel: MainViewModel) {
         if (audioAllowed) {
             if (pendingPlayback) projectionLauncher.launch(context.getSystemService(MediaProjectionManager::class.java).createScreenCaptureIntent())
             else viewModel.startRecording(Activity.RESULT_OK, null, pendingMicrophone, false)
-        } else viewModel.showMessage(tr(lang, "录音需要音频权限，请在系统设置中允许。", "録音の音声権限を許可してください。", "Audio permission is required; allow it in system settings."))
+        } else viewModel.cancelRecordingStart(tr(lang, "录音需要音频权限，请在系统设置中允许。", "録音の音声権限を許可してください。", "Audio permission is required; allow it in system settings."))
     }
 
     fun startRecording() {
+        if (!viewModel.reserveRecordingStart()) return
         pendingMicrophone = microphone
         pendingPlayback = playback
         val permissions = buildList {
@@ -174,7 +179,7 @@ private fun BabelEchoApp(viewModel: MainViewModel) {
                         onExport = { meeting, uri, format -> viewModel.exportMeeting(meeting, uri, format) }, onError = viewModel::showMessage,
                     )
                     AppPage.History -> HistoryScreen(Modifier.padding(padding), state, onOpen = { viewModel.selectMeeting(it.id); page = AppPage.Workspace }, onDelete = viewModel::deleteMeeting)
-                    AppPage.Settings -> SettingsScreen(Modifier.padding(padding), state.settings, viewModel::saveSettings, state.isRecording || state.isStarting || state.isStopping || state.workingMeetingId != null)
+                    AppPage.Settings -> SettingsScreen(Modifier.padding(padding), settingsDraft, viewModel::editSettings, viewModel::saveSettings, state.isSavingSettings || state.isRecording || state.isStarting || state.isStopping || state.workingMeetingId != null, settingsDraft != state.settings)
                 }
             }
         }
@@ -256,7 +261,7 @@ private fun WorkspaceScreen(
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(exportFormat.mime)) { uri ->
         if (uri != null) state.meetings.firstOrNull { it.id == exportId }?.let { onExport(it, uri, exportFormat) }
     }
-    val busy = state.workingMeetingId != null || state.isRecording || state.isStarting || state.isStopping
+    val busy = state.workingMeetingId != null || state.isRecording || state.isStarting || state.isStopping || state.isSavingSettings
     val elapsed = if (state.isRecording) state.recordedDurationMs else meeting?.durationMs ?: 0
 
     LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(14.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
@@ -276,6 +281,23 @@ private fun WorkspaceScreen(
         if (meeting != null && !state.isRecording && !state.isStarting && !state.isStopping) item { PlaybackCard(meeting, seekMs, seekRevision, onError) }
         if (state.workingMeetingId != null) item { LinearProgressIndicator(Modifier.fillMaxWidth()); Text(tr(lang, "正在处理，录音已保存在本机", "処理中。音声は端末に保存されています", "Processing · audio is saved locally"), color = Muted) }
         item { MeetingTabs(lang, panel) { panel = it } }
+        if (meeting != null && panel != MeetingPanel.Stats) item {
+            val body = when (panel) {
+                MeetingPanel.Transcript -> MeetingExport.transcript(meeting)
+                MeetingPanel.Summary -> meeting.summary
+                MeetingPanel.Minutes -> meeting.minutes
+                MeetingPanel.Ask -> MeetingExport.questions(meeting)
+                MeetingPanel.Stats -> ""
+            }
+            val context = LocalContext.current
+            TextButton(onClick = {
+                context.getSystemService(android.content.ClipboardManager::class.java)
+                    .setPrimaryClip(android.content.ClipData.newPlainText("Babel Echo", body))
+            }, enabled = body.isNotBlank()) {
+                Icon(Icons.Rounded.ContentCopy, null); Spacer(Modifier.width(6.dp))
+                Text(tr(lang, "复制本页全部内容", "このパネルをすべてコピー", "Copy all in this panel"))
+            }
+        }
         item {
             GlassCard {
                 when (panel) {
@@ -421,7 +443,7 @@ private fun TranscriptRow(segment: TranscriptSegment, onSeek: (Long) -> Unit, on
         Column(Modifier.weight(1f)) {
             Text(segment.speaker, modifier = Modifier.clickable(enabled = enabled) { onSpeaker(segment.speaker) }, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
             SelectionContainer { Text(segment.text, lineHeight = MaterialTheme.typography.bodyLarge.lineHeight) }
-            if (segment.translated.isNotBlank()) { Spacer(Modifier.height(5.dp)); Text(segment.translated, color = Muted, style = MaterialTheme.typography.bodyMedium) }
+            if (segment.translated.isNotBlank()) { Spacer(Modifier.height(5.dp)); SelectionContainer { Text(segment.translated, color = Muted, style = MaterialTheme.typography.bodyMedium) } }
         }
     }; HorizontalDivider(color = Ink.copy(alpha = .055f))
 }
@@ -437,7 +459,7 @@ private fun TextPanel(lang: String, title: String, content: String, empty: Strin
 private fun AskPanel(lang: String, meeting: Meeting?, working: Boolean, onAsk: (String) -> Unit) {
     var question by remember(meeting?.id) { mutableStateOf("") }
     PanelHeader(tr(lang, "会议问答", "会議への質問", "Ask this meeting"), "${meeting?.qa?.size ?: 0}")
-    meeting?.qa?.forEach { entry -> Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) { Text("Q  ${entry.question}", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary); Spacer(Modifier.height(5.dp)); SelectionContainer { Text(entry.answer) } }; HorizontalDivider(color = Ink.copy(alpha = .06f)) }
+    meeting?.qa?.forEach { entry -> Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) { SelectionContainer { Text("Q  ${entry.question}", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary) }; Spacer(Modifier.height(5.dp)); SelectionContainer { Text(entry.answer) } }; HorizontalDivider(color = Ink.copy(alpha = .06f)) }
     if (meeting?.qa.isNullOrEmpty()) Text(tr(lang, "基于全部转写提问，回答会尽量标注时间。", "文字起こしに基づいて回答します。", "Answers use the transcript and cite time when possible."), color = Muted)
     Spacer(Modifier.height(12.dp)); Row(verticalAlignment = Alignment.CenterVertically) {
         OutlinedTextField(question, { question = it }, Modifier.weight(1f), placeholder = { Text(tr(lang, "例如：谁负责下一步？", "例：次の担当者は？", "Who owns the next step?")) }, maxLines = 3)
@@ -452,11 +474,16 @@ private fun StatsPanel(lang: String, meeting: Meeting?, onShare: () -> Unit, onE
     StatRow(tr(lang, "录音时长", "録音時間", "Duration"), formatDuration(meeting?.durationMs ?: 0)); StatRow(tr(lang, "语音请求", "音声リクエスト", "ASR requests"), (stats?.asrCalls ?: 0).toString()); StatRow(tr(lang, "文本模型请求", "LLM リクエスト", "LLM requests"), (stats?.llmCalls ?: 0).toString()); StatRow(tr(lang, "转写字符", "文字数", "Transcript characters"), (stats?.transcriptChars ?: meeting?.transcript?.length ?: 0).toString()); StatRow(tr(lang, "声音来源", "音声ソース", "Sources"), listOfNotNull("MIC".takeIf { meeting?.usedMicrophone == true }, "SYSTEM".takeIf { meeting?.usedPlayback == true }).joinToString(" + "))
     StatRow(tr(lang, "已处理音频秒数", "処理した音声秒数", "Processed audio seconds"), String.format(Locale.US, "%.1f", stats?.asrSeconds ?: 0.0))
     StatRow(tr(lang, "输入 / 输出 token", "入力 / 出力 token", "Input / output tokens"), "${stats?.inputTokens ?: 0} / ${stats?.outputTokens ?: 0}")
+    stats?.textUsageByTask?.forEach { (task, usage) ->
+        StatRow(task.uppercase(), "${usage.calls} · ${usage.inputTokens} / ${usage.outputTokens}")
+        usage.reasoningTokens?.let { StatRow(tr(lang, "其中思考 token", "うち思考 token", "Reasoning subset"), it.toString()) }
+        if (usage.unreportedCalls > 0) StatRow(tr(lang, "未报告完整用量的请求", "使用量が未報告", "Requests with incomplete usage"), usage.unreportedCalls.toString())
+    }
     val estimate = (stats?.asrSeconds ?: 0.0) / 3_600 * settings.asrPricePerHour +
         (stats?.inputTokens ?: 0) / 1_000_000.0 * settings.inputPricePerMillion +
         (stats?.outputTokens ?: 0) / 1_000_000.0 * settings.outputPricePerMillion
     StatRow(tr(lang, "按当前费率估算（非账单）", "現在の単価による概算（請求額ではありません）", "Estimate at current rates (not a bill)"), if (settings.asrPricePerHour + settings.inputPricePerMillion + settings.outputPricePerMillion > 0) String.format(Locale.US, "%.4f %s", estimate, settings.priceCurrency) else tr(lang, "请在设置中填写费率", "設定で単価を入力", "Set rates in Settings"))
-    Text(tr(lang, "统计仅包含成功请求；旧会议和未返回用量的服务可能低估。", "成功リクエストのみ。古い会議や使用量未対応のサービスは過小計上の場合があります。", "Successful requests only. Older meetings and providers without usage data may be undercounted."), style = MaterialTheme.typography.bodySmall, color = Muted)
+    Text(tr(lang, "包含返回空内容或被截断的文本请求；未返回用量的请求和旧会议可能低估。思考 token 已包含在输出中。", "空・途中の応答も集計。未報告の使用量は過小計上。思考 token は出力に含まれます。", "Includes empty/truncated text responses. Missing usage and older meetings may be undercounted. Reasoning tokens are included in output."), style = MaterialTheme.typography.bodySmall, color = Muted)
     Spacer(Modifier.height(10.dp)); OutlinedButton(onClick = onExport, enabled = meeting != null && !busy, modifier = Modifier.fillMaxWidth()) { Text(tr(lang, "导出文件（MD / TXT / VTT / JSON / WAV）", "ファイル保存（MD / TXT / VTT / JSON / WAV）", "Export file (MD / TXT / VTT / JSON / WAV)")) }
     Spacer(Modifier.height(10.dp)); Button(onClick = onShare, enabled = meeting != null, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Indigo, contentColor = Color.White)) { Icon(Icons.Rounded.Share, null); Spacer(Modifier.width(6.dp)); Text(tr(lang, "分享 Markdown", "Markdown を共有", "Share Markdown")) }
 }
@@ -485,43 +512,57 @@ private fun HistoryScreen(modifier: Modifier, state: MainUiState, onOpen: (Meeti
 }
 
 @Composable
-private fun SettingsScreen(modifier: Modifier, initial: AppSettings, onSave: (AppSettings) -> Unit, locked: Boolean) {
-    var value by remember(initial) { mutableStateOf(initial) }; val lang = value.uiLanguage
+private fun SettingsScreen(modifier: Modifier, draft: AppSettings, onChange: (AppSettings) -> Unit, onSave: (AppSettings) -> Unit, locked: Boolean, unsaved: Boolean) {
+    val value = draft; val lang = value.uiLanguage
     Column(modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(if (unsaved) tr(lang, "有未保存的修改", "未保存の変更", "Unsaved changes") else tr(lang, "设置已保存", "保存済み", "Settings saved"), Modifier.weight(1f), color = Muted)
+            Button(onClick = { onSave(value) }, enabled = !locked) { Text(tr(lang, "保存", "保存", "Save")) }
+        }
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(14.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
             SectionTitle("巴别回声", tr(lang, "设置", "設定", "Settings"), tr(lang, "模型、语言、分段与隐私", "モデル・言語・プライバシー", "Models, languages, chunking, and privacy"))
-            SettingsCard(tr(lang, "界面与语言", "表示と言語", "Interface & languages")) { ChoiceRow(tr(lang, "界面语言", "表示言語", "Interface"), listOf("zh", "ja", "en"), value.uiLanguage) { value = value.copy(uiLanguage = it) }; ChoiceRow(tr(lang, "识别语言", "認識言語", "Speech language"), listOf("auto", "zh", "ja", "en"), value.asrLanguage) { value = value.copy(asrLanguage = it) }; ChoiceRow(tr(lang, "翻译为", "翻訳先", "Translate to"), listOf("", "zh", "ja", "en"), value.translateTo) { value = value.copy(translateTo = it) } }
+            SettingsCard(tr(lang, "界面与语言", "表示と言語", "Interface & languages")) { ChoiceRow(tr(lang, "界面语言", "表示言語", "Interface"), listOf("zh", "ja", "en"), value.uiLanguage) { onChange(value.copy(uiLanguage = it)) }; ChoiceRow(tr(lang, "识别语言", "認識言語", "Speech language"), listOf("auto", "zh", "ja", "en"), value.asrLanguage) { onChange(value.copy(asrLanguage = it)) }; ChoiceRow(tr(lang, "翻译为", "翻訳先", "Translate to"), listOf("", "zh", "ja", "en"), value.translateTo) { onChange(value.copy(translateTo = it)) } }
             SettingsCard(tr(lang, "语音识别", "音声認識", "Speech recognition")) {
-                ChoiceRow(tr(lang, "接口协议", "プロトコル", "Protocol"), listOf("openai", "mimo", "deepgram"), value.asrKind) { value = value.copy(asrKind = it) }
+                ChoiceRow(tr(lang, "接口协议", "プロトコル", "Protocol"), listOf("openai", "mimo", "deepgram"), value.asrKind) { onChange(value.copy(asrKind = it)) }
                 Text(tr(lang, "Groq 使用 OpenAI 协议；MiMo 仅支持明确选择中文或英文。端点与模型 ID 可自由输入。", "Groq は OpenAI。MiMo は中国語・英語のみ。URL とモデルは編集できます。", "Groq uses OpenAI. MiMo requires Chinese or English. URLs and model IDs remain editable."), style = MaterialTheme.typography.bodySmall, color = Muted)
-                SettingField(tr(lang, "服务地址", "サービス URL", "Base URL"), value.asrBaseUrl) { value = value.copy(asrBaseUrl = it) }
-                SettingField(tr(lang, "模型 ID", "モデル ID", "Model ID"), value.asrModel) { value = value.copy(asrModel = it) }
-                SecretField("ASR API Key", value.asrApiKey) { value = value.copy(asrApiKey = it) }
-                SettingsSwitch(tr(lang, "本地服务无需密钥", "ローカルサービスはキー不要", "Local service needs no key"), value.asrNoAuth) { value = value.copy(asrNoAuth = it) }
+                SettingField(tr(lang, "服务地址", "サービス URL", "Base URL"), value.asrBaseUrl) { onChange(value.copy(asrBaseUrl = it)) }
+                SettingField(tr(lang, "模型 ID", "モデル ID", "Model ID"), value.asrModel) { onChange(value.copy(asrModel = it)) }
+                SecretField("ASR API Key", value.asrApiKey) { onChange(value.copy(asrApiKey = it)) }
+                SettingsSwitch(tr(lang, "本地服务无需密钥", "ローカルサービスはキー不要", "Local service needs no key"), value.asrNoAuth) { onChange(value.copy(asrNoAuth = it)) }
             }
             SettingsCard(tr(lang, "文本模型", "テキストモデル", "Text models")) {
-                SettingField(tr(lang, "服务地址", "サービス URL", "Base URL"), value.llmBaseUrl) { value = value.copy(llmBaseUrl = it) }
-                SettingField(tr(lang, "默认模型（任务留空时使用）", "既定モデル", "Default model (fallback)"), value.llmModel) { value = value.copy(llmModel = it) }
-                SecretField("LLM API Key", value.llmApiKey) { value = value.copy(llmApiKey = it) }
-                SettingsSwitch(tr(lang, "本地服务无需密钥", "ローカルサービスはキー不要", "Local service needs no key"), value.llmNoAuth) { value = value.copy(llmNoAuth = it) }
-                SettingField(tr(lang, "摘要模型", "要約モデル", "Summary model"), value.summaryModel) { value = value.copy(summaryModel = it) }
-                SettingField(tr(lang, "纪要模型", "議事録モデル", "Minutes model"), value.minutesModel) { value = value.copy(minutesModel = it) }
-                SettingField(tr(lang, "翻译模型", "翻訳モデル", "Translation model"), value.translateModel) { value = value.copy(translateModel = it) }
-                SettingField(tr(lang, "问答模型", "質問モデル", "Q&A model"), value.askModel) { value = value.copy(askModel = it) }
+                SettingField(tr(lang, "服务地址", "サービス URL", "Base URL"), value.llmBaseUrl) { onChange(value.copy(llmBaseUrl = it)) }
+                ModelPicker(tr(lang, "默认模型（任务留空时使用）", "既定モデル", "Default model (fallback)"), value.llmModel, { onChange(value.copy(llmModel = it)) },
+                    value.llmBaseUrl, value.llmApiKey, value.llmNoAuth, value.allowInsecureHttp, lang, null, null)
+                SecretField("LLM API Key", value.llmApiKey) { onChange(value.copy(llmApiKey = it)) }
+                SettingsSwitch(tr(lang, "本地服务无需密钥", "ローカルサービスはキー不要", "Local service needs no key"), value.llmNoAuth) { onChange(value.copy(llmNoAuth = it)) }
+                ModelPicker(tr(lang, "摘要模型", "要約モデル", "Summary model"), value.summaryModel, { onChange(value.copy(summaryModel = it)) },
+                    value.llmBaseUrl, value.llmApiKey, value.llmNoAuth, value.allowInsecureHttp, lang, value.textThinking["summary"], { onChange(value.copy(textThinking = value.textThinking + ("summary" to it))) })
+                ModelPicker(tr(lang, "纪要模型", "議事録モデル", "Minutes model"), value.minutesModel, { onChange(value.copy(minutesModel = it)) },
+                    value.llmBaseUrl, value.llmApiKey, value.llmNoAuth, value.allowInsecureHttp, lang, value.textThinking["minutes"], { onChange(value.copy(textThinking = value.textThinking + ("minutes" to it))) })
+                ModelPicker(tr(lang, "翻译模型", "翻訳モデル", "Translation model"), value.translateModel, { onChange(value.copy(translateModel = it)) },
+                    value.llmBaseUrl, value.llmApiKey, value.llmNoAuth, value.allowInsecureHttp, lang, value.textThinking["translation"], { onChange(value.copy(textThinking = value.textThinking + ("translation" to it))) })
+                ModelPicker(tr(lang, "问答模型", "質問モデル", "Q&A model"), value.askModel, { onChange(value.copy(askModel = it)) },
+                    value.llmBaseUrl, value.llmApiKey, value.llmNoAuth, value.allowInsecureHttp, lang, value.textThinking["ask"], { onChange(value.copy(textThinking = value.textThinking + ("ask" to it))) })
             }
             SettingsCard(tr(lang, "实时处理", "リアルタイム処理", "Realtime processing")) {
-                SettingsSwitch(tr(lang, "实时转写（向识别服务发送音频）", "リアルタイム文字起こし（音声送信）", "Live transcription (sends audio to ASR)"), value.liveTranscription) { value = value.copy(liveTranscription = it) }
-                SettingsSwitch(tr(lang, "结束后自动生成纪要（有转写时发送文本）", "終了後に議事録を作成（文字起こし送信）", "Auto minutes on stop (sends existing transcript)"), value.autoMinutes) { value = value.copy(autoMinutes = it) }
-                 NumberField(tr(lang, "分段秒数（10–120）", "チャンク秒（10–120）", "Chunk seconds (10–120)"), value.chunkSeconds) { value = value.copy(chunkSeconds = it) }; NumberField(tr(lang, "重叠秒数（0–10）", "重複秒（0–10）", "Overlap seconds (0–10)"), value.overlapSeconds) { value = value.copy(overlapSeconds = it) }; NumberField(tr(lang, "自动摘要秒数（0 关闭）", "自動要約秒（0 で無効）", "Auto summary seconds (0 off)"), value.autoSummarySeconds) { value = value.copy(autoSummarySeconds = it) } }
-            ProviderProfiles(value) { value = it }
+                SettingsSwitch(tr(lang, "实时转写（向识别服务发送音频）", "リアルタイム文字起こし（音声送信）", "Live transcription (sends audio to ASR)"), value.liveTranscription) { onChange(value.copy(liveTranscription = it)) }
+                SettingsSwitch(tr(lang, "静音断句（停顿 1.2 秒后转写）", "無音で区切る（1.2 秒）", "Split at silence (1.2 seconds)"), value.liveUtterances) { onChange(value.copy(liveUtterances = it)) }
+                if (value.liveUtterances) {
+                    Text(tr(lang, "保留说话前 0.3 秒；分段秒数为最长句子长度。持续静音不会提交，原始录音仍完整保存。", "発話前 0.3 秒を保持。チャンク秒は最長発話。無音は送信せず録音は保持します。", "Keeps 0.3 seconds before speech. Chunk seconds is the maximum utterance. Silent periods stay in the local recording and are not submitted."), style = MaterialTheme.typography.bodySmall, color = Muted)
+                    PriceField(tr(lang, "声音阈值（0.0001–0.1，越低越敏感）", "音声閾値（低いほど敏感）", "Voice threshold (0.0001–0.1; lower is more sensitive)"), value.vadThreshold) { onChange(value.copy(vadThreshold = it)) }
+                }
+                SettingsSwitch(tr(lang, "结束后自动生成纪要（有转写时发送文本）", "終了後に議事録を作成（文字起こし送信）", "Auto minutes on stop (sends existing transcript)"), value.autoMinutes) { onChange(value.copy(autoMinutes = it)) }
+                 NumberField(tr(lang, "分段秒数（10–120）", "チャンク秒（10–120）", "Chunk seconds (10–120)"), value.chunkSeconds) { onChange(value.copy(chunkSeconds = it)) }; NumberField(tr(lang, "重叠秒数（0–10）", "重複秒（0–10）", "Overlap seconds (0–10)"), value.overlapSeconds) { onChange(value.copy(overlapSeconds = it)) }; NumberField(tr(lang, "自动摘要秒数（0 关闭）", "自動要約秒（0 で無効）", "Auto summary seconds (0 off)"), value.autoSummarySeconds) { onChange(value.copy(autoSummarySeconds = it)) } }
+            ProviderProfiles(value, onChange)
             SettingsCard(tr(lang, "费用估算", "費用の概算", "Cost estimates")) {
                 Text(tr(lang, "填写同一币种的服务费率。混用不同模型时此估算不等于账单。", "同じ通貨の単価を入力。異なるモデルを使うと請求額と異なります。", "Enter rates in one currency. Mixed models and missing usage may differ from your bill."), style = MaterialTheme.typography.bodySmall, color = Muted)
-                ChoiceRow(tr(lang, "币种", "通貨", "Currency"), listOf("USD", "CNY", "JPY"), value.priceCurrency) { value = value.copy(priceCurrency = it) }
-                PriceField(tr(lang, "ASR / 音频小时", "ASR / 音声時間", "ASR / audio hour"), value.asrPricePerHour) { value = value.copy(asrPricePerHour = it) }
-                PriceField(tr(lang, "文本输入 / 百万 token", "入力 / 100万 token", "Input / million tokens"), value.inputPricePerMillion) { value = value.copy(inputPricePerMillion = it) }
-                PriceField(tr(lang, "文本输出 / 百万 token", "出力 / 100万 token", "Output / million tokens"), value.outputPricePerMillion) { value = value.copy(outputPricePerMillion = it) }
+                ChoiceRow(tr(lang, "币种", "通貨", "Currency"), listOf("USD", "CNY", "JPY"), value.priceCurrency) { onChange(value.copy(priceCurrency = it)) }
+                PriceField(tr(lang, "ASR / 音频小时", "ASR / 音声時間", "ASR / audio hour"), value.asrPricePerHour) { onChange(value.copy(asrPricePerHour = it)) }
+                PriceField(tr(lang, "文本输入 / 百万 token", "入力 / 100万 token", "Input / million tokens"), value.inputPricePerMillion) { onChange(value.copy(inputPricePerMillion = it)) }
+                PriceField(tr(lang, "文本输出 / 百万 token", "出力 / 100万 token", "Output / million tokens"), value.outputPricePerMillion) { onChange(value.copy(outputPricePerMillion = it)) }
             }
-            SettingsCard(tr(lang, "本地模型与隐私", "ローカルモデルとプライバシー", "Local models & privacy")) { Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(tr(lang, "允许 HTTP", "HTTP を許可", "Allow HTTP"), fontWeight = FontWeight.SemiBold); Text(tr(lang, "HTTP 不加密音频、文本与密钥，仅用于可信局域网", "HTTP は音声・テキスト・キーを暗号化しません", "HTTP does not encrypt audio, text or keys; trusted LAN only"), style = MaterialTheme.typography.bodySmall, color = Muted) }; Switch(value.allowInsecureHttp, { value = value.copy(allowInsecureHttp = it) }) }; Text(tr(lang, "密钥使用 Android Keystore 加密。音频和文本仅在操作需要时发送到你配置的地址。", "キーは Android Keystore で暗号化されます。", "Keys are encrypted with Android Keystore. Data is sent only for requested processing."), style = MaterialTheme.typography.bodySmall, color = Muted) }
+            SettingsCard(tr(lang, "本地模型与隐私", "ローカルモデルとプライバシー", "Local models & privacy")) { Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(tr(lang, "允许 HTTP", "HTTP を許可", "Allow HTTP"), fontWeight = FontWeight.SemiBold); Text(tr(lang, "HTTP 不加密音频、文本与密钥，仅用于可信局域网", "HTTP は音声・テキスト・キーを暗号化しません", "HTTP does not encrypt audio, text or keys; trusted LAN only"), style = MaterialTheme.typography.bodySmall, color = Muted) }; Switch(value.allowInsecureHttp, { onChange(value.copy(allowInsecureHttp = it)) }) }; Text(tr(lang, "密钥使用 Android Keystore 加密。音频和文本仅在操作需要时发送到你配置的地址。", "キーは Android Keystore で暗号化されます。", "Keys are encrypted with Android Keystore. Data is sent only for requested processing."), style = MaterialTheme.typography.bodySmall, color = Muted) }
         }
         Button(onClick = { onSave(value) }, enabled = !locked, modifier = Modifier.fillMaxWidth().padding(14.dp).height(50.dp), shape = RoundedCornerShape(15.dp), colors = ButtonDefaults.buttonColors(containerColor = Indigo, contentColor = Color.White)) { Text(tr(lang, "保存设置", "設定を保存", "Save settings"), fontWeight = FontWeight.Bold) }
     }
@@ -570,16 +611,66 @@ private fun ProviderProfiles(value: AppSettings, onChange: (AppSettings) -> Unit
             listOf("summary", "minutes", "translation", "ask", "speaker").forEach { task ->
                 val role = value.textRoles.getValue(task)
                 ChoiceRow(task.uppercase(), value.textProfiles.map { it.id }, role.provider) {
-                    onChange(value.copy(textRoles = value.textRoles + (task to role.copy(provider = it))))
+                    onChange(value.copy(textRoles = value.textRoles + (task to TextModelPolicy.initial(value.textProfiles.first { profile -> profile.id == it }, task))))
                 }
-                SettingField("$task Model ID", role.model) { onChange(value.copy(textRoles = value.textRoles + (task to role.copy(model = it)))) }
+                val provider = value.textProfiles.firstOrNull { it.id == role.provider }
+                if (provider != null) ModelPicker("$task Model ID", role.model,
+                    { onChange(value.copy(textRoles = value.textRoles + (task to role.copy(model = it)))) },
+                    provider.baseUrl, provider.apiKey, provider.noAuth, value.allowInsecureHttp, lang, role.thinking,
+                    { onChange(value.copy(textRoles = value.textRoles + (task to role.copy(thinking = it)))) })
             }
         }
     }
 }
 
+private class ModelListState {
+    var models by mutableStateOf(emptyList<String>())
+    var loading by mutableStateOf(false)
+    var status by mutableStateOf("")
+    var active = true
+}
+
+@Composable
+private fun ModelPicker(label: String, model: String, onModel: (String) -> Unit, baseUrl: String, apiKey: String,
+    noAuth: Boolean, allowInsecure: Boolean, lang: String, thinking: String?, onThinking: ((String) -> Unit)?) {
+    val context = LocalContext.current
+    // Each draft endpoint/authentication snapshot owns its results. Late requests cannot populate another provider.
+    val list = remember(baseUrl, apiKey, noAuth, allowInsecure) { ModelListState() }
+    val client = remember(list) { CloudClient(context) }
+    val scope = rememberCoroutineScope()
+    var expanded by remember(list) { mutableStateOf(false) }
+    DisposableEffect(list) { onDispose { list.active = false; client.cancel() } }
+    SettingField(label, model, onModel)
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        TextButton(onClick = {
+            list.loading = true; list.status = ""
+            scope.launch {
+                val result = runCatching { client.discoverModels(baseUrl, apiKey, noAuth, allowInsecure) }
+                if (list.active) {
+                    result.onSuccess { list.models = it; list.status = "${it.size} " + tr(lang, "个模型", "件のモデル", "models") }
+                        .onFailure { list.status = it.message.orEmpty() }
+                    list.loading = false
+                }
+            }
+        }, enabled = !list.loading && baseUrl.isNotBlank()) {
+            Text(tr(lang, "获取模型列表", "モデル一覧を取得", "Fetch models"))
+        }
+        if (list.loading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+        if (list.models.isNotEmpty()) Box {
+            TextButton(onClick = { expanded = true }) { Text(tr(lang, "选择模型", "モデルを選択", "Choose model")) }
+            DropdownMenu(expanded, { expanded = false }) {
+                list.models.forEach { id -> DropdownMenuItem(text = { Text(id) }, onClick = { onModel(id); expanded = false }) }
+            }
+        }
+    }
+    if (list.status.isNotBlank()) SelectionContainer { Text(list.status, style = MaterialTheme.typography.bodySmall, color = Muted) }
+    Text(tr(lang, "获取列表会联系此处填写的服务；不会更改已输入的模型。", "一覧取得は入力したサービスに接続します。モデルは変更しません。", "Fetching contacts this draft service; your typed model stays unchanged."), style = MaterialTheme.typography.bodySmall, color = Muted)
+    if (onThinking != null && TextModelPolicy.isDeepSeek(baseUrl)) ChoiceRow(tr(lang, "思考模式（DeepSeek 官方）", "思考モード（DeepSeek 公式）", "Thinking (official DeepSeek)"),
+        listOf("default", "disabled", "enabled"), thinking ?: "default", onThinking)
+}
+
 @Composable private fun SettingsCard(title: String, content: @Composable ColumnScope.() -> Unit) = GlassCard { Text(title, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary); Spacer(Modifier.height(10.dp)); Column(verticalArrangement = Arrangement.spacedBy(9.dp), content = content) }
-@Composable private fun ChoiceRow(label: String, choices: List<String>, selected: String, onSelect: (String) -> Unit) { Column { Text(label, style = MaterialTheme.typography.labelMedium, color = Muted); Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { choices.forEach { choice -> FilterChip(selected == choice, { onSelect(choice) }, { Text(choice.ifBlank { "OFF" }.uppercase()) }) } } } }
+@Composable private fun ChoiceRow(label: String, choices: List<String>, selected: String, onSelect: (String) -> Unit) { Column { Text(label, style = MaterialTheme.typography.labelMedium, color = Muted); Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) { choices.forEach { choice -> FilterChip(selected == choice, { onSelect(choice) }, { Text(choice.ifBlank { "OFF" }.uppercase()) }) } } } }
 @Composable private fun SettingField(label: String, value: String, onChange: (String) -> Unit) = OutlinedTextField(value, onChange, Modifier.fillMaxWidth(), label = { Text(label) }, singleLine = true)
 @Composable private fun SecretField(label: String, value: String, onChange: (String) -> Unit) = OutlinedTextField(value, onChange, Modifier.fillMaxWidth(), label = { Text(label) }, singleLine = true, visualTransformation = PasswordVisualTransformation())
 @Composable private fun SettingsSwitch(label: String, checked: Boolean, onChange: (Boolean) -> Unit) { Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { Text(label, modifier = Modifier.weight(1f)); Switch(checked, onChange) } }
@@ -599,6 +690,6 @@ private fun ProviderProfiles(value: AppSettings, onChange: (AppSettings) -> Unit
 private fun tr(lang: String, zh: String, ja: String, en: String): String = when (lang) { "ja" -> ja; "en" -> en; else -> zh }
 private fun formatDuration(ms: Long): String { val total = (ms / 1_000).coerceAtLeast(0); return if (total >= 3_600) String.format(Locale.US, "%d:%02d:%02d", total / 3_600, total / 60 % 60, total % 60) else String.format(Locale.US, "%02d:%02d", total / 60, total % 60) }
 private fun shareMeeting(context: android.content.Context, meeting: Meeting) {
-    val body = buildString { append("# ${meeting.title}\n\n"); if (meeting.summary.isNotBlank()) append("## 摘要\n\n${meeting.summary}\n\n"); if (meeting.minutes.isNotBlank()) append("## 纪要\n\n${meeting.minutes}\n\n"); append("## 转写\n\n"); if (meeting.segments.isNotEmpty()) meeting.segments.forEach { append("[${formatDuration(it.startMs)}] ${it.speaker}: ${it.text}\n") } else append(meeting.transcript) }
+    val body = MeetingExport.text(meeting, ExportFormat.Markdown)
     context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/markdown").putExtra(Intent.EXTRA_SUBJECT, meeting.title).putExtra(Intent.EXTRA_TEXT, body), "Babel Echo"))
 }

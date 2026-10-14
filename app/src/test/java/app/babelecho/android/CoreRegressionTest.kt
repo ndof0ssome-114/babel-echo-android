@@ -6,6 +6,7 @@ import app.babelecho.android.cloud.WavChunker
 import app.babelecho.android.data.*
 import app.babelecho.android.recording.PcmResampler
 import app.babelecho.android.recording.WavFileWriter
+import app.babelecho.android.recording.UtteranceSegmenter
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -190,5 +191,126 @@ class CoreRegressionTest {
             assertEquals(160L, usages.sumOf { it.inputTokens })
             repeat(4) { assertTrue(server.takeRequest().body.readUtf8().length < 25_500) }
         }
+    }
+
+    @Test fun noAuthOmitsSavedKeysForEveryAdapterAndTextAndDiscovery() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val value = settings(server).copy(asrApiKey = "fixture-saved-asr", llmApiKey = "fixture-saved-text")
+            val client = CloudClient(temp.root)
+            server.enqueue(asr("hello")); client.transcribeResult(wav(1), value)
+            server.enqueue(chat("hello")); client.transcribeResult(wav(1), value.copy(asrKind = "mimo", asrLanguage = "zh"))
+            server.enqueue(MockResponse().setBody("""{"results":{"channels":[{"alternatives":[{"transcript":"hello"}]}]}}"""))
+            client.transcribeResult(wav(1), value.copy(asrKind = "deepgram"))
+            server.enqueue(chat("summary")); client.summarize("hello", value)
+            server.enqueue(MockResponse().setBody("""{"data":[{"id":"model-b"},{"id":"model-a"},{"id":"model-b"},{"id":""}]}"""))
+            assertEquals(listOf("model-a", "model-b"), client.discoverModels(value.llmBaseUrl, value.llmApiKey, true, true))
+            repeat(5) { assertNull(server.takeRequest().getHeader("Authorization")) }
+        }
+    }
+
+    @Test fun discoveryUsesOnlyDraftEndpointAndDraftKeyWithoutMeetingData() = runBlocking {
+        MockWebServer().use { server ->
+            server.start(); server.enqueue(MockResponse().setBody("""{"data":[{"id":"custom-model"}]}"""))
+            assertEquals(listOf("custom-model"), CloudClient(temp.root).discoverModels(server.url("/draft/").toString(), "fixture-draft", false, true))
+            val request = server.takeRequest()
+            assertEquals("GET", request.method); assertEquals("/draft/models", request.path)
+            assertEquals("Bearer fixture-draft", request.getHeader("Authorization")); assertEquals(0L, request.bodySize)
+            assertTrue(runCatching { CloudClient(temp.root).discoverModels(server.url("/").toString(), "", false, true) }.isFailure)
+            assertTrue(runCatching { CloudClient(temp.root).discoverModels(server.url("/").toString(), "", true, false) }.isFailure)
+            assertEquals(1, server.requestCount)
+        }
+    }
+
+    @Test fun emptyAndTruncatedResponsesReportUsageBeforeFailingWithoutRetry() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val usages = mutableListOf<ModelUsage>()
+            val client = CloudClient(temp.root) { usages += it }
+            for (content in listOf("", "unfinished")) {
+                server.enqueue(MockResponse().setBody("""{"choices":[{"finish_reason":"length","message":{"content":"$content"}}],"usage":{"prompt_tokens":12,"completion_tokens":20,"completion_tokens_details":{"reasoning_tokens":15}}}"""))
+                assertTrue(runCatching { client.summarize("hello", settings(server)) }.isFailure)
+            }
+            assertEquals(2, server.requestCount); assertEquals(2, usages.size)
+            assertEquals(40L, usages.sumOf { it.outputTokens }); assertEquals(30L, usages.sumOf { it.reasoningTokens ?: 0 })
+            assertEquals(setOf("summary"), usages.map { it.task }.toSet())
+        }
+    }
+
+    @Test fun missingUsageIsExplicitAndNonDeepSeekNeverReceivesThinking() = runBlocking {
+        MockWebServer().use { server ->
+            server.start(); server.enqueue(MockResponse().setBody("""{"choices":[{"message":{"content":"Done"}}]}"""))
+            var usage = ModelUsage()
+            CloudClient(temp.root) { usage = it }.createMinutes(meeting(), settings(server).copy(textThinking = mapOf("minutes" to "enabled")))
+            val body = JSONObject(server.takeRequest().body.readUtf8())
+            assertFalse(body.has("thinking")); assertEquals(8192, body.getInt("max_tokens"))
+            assertEquals(1, usage.unreportedCalls); assertNull(usage.reasoningTokens)
+        }
+    }
+
+    @Test fun thinkingScopeAndProviderSwitchAreExactAndPreserveOldDefaults() {
+        assertTrue(TextModelPolicy.isDeepSeek("https://API.DEEPSEEK.COM/v1"))
+        assertFalse(TextModelPolicy.isDeepSeek("https://api.deepseek.com.example/v1"))
+        assertFalse(TextModelPolicy.isDeepSeek("https://example.com/api.deepseek.com"))
+        assertEquals(16384, TextModelPolicy.outputLimit("https://api.deepseek.com/v1", "summary", null))
+        assertEquals(4096, TextModelPolicy.outputLimit("https://api.deepseek.com/v1", "summary", "disabled"))
+        assertEquals(8192, TextModelPolicy.outputLimit("https://api.deepseek.com/v1", "minutes", "disabled"))
+        val changed = TextModelPolicy.initial(TextProfile("local", "http://localhost:1234/v1"), "summary")
+        assertEquals("", changed.model); assertNull(changed.thinking)
+        val old = TextRole("deepseek", "my-old-model")
+        val settings = AppSettings(useTextProfiles = true, textProfiles = listOf(TextProfile("deepseek", "https://api.deepseek.com/v1", true, noAuth = true)), textRoles = mapOf("summary" to old))
+        assertNull(settings.forText("summary", "").first.textThinking["summary"])
+    }
+
+    @Test fun taskUsageAndSummaryCursorRoundTripWithoutDoubleCountingReasoning() {
+        val result = meeting().withUsage(ModelUsage(llmCalls = 1, inputTokens = 10, outputTokens = 20, reasoningTokens = 15, task = "summary"))
+            .withUsage(ModelUsage(llmCalls = 1, task = "ask", unreportedCalls = 1)).copy(summaryUpTo = 1)
+        assertEquals(result, MeetingJson.decode(MeetingJson.encode(result)))
+        assertEquals(20L, result.stats.outputTokens); assertEquals(15L, result.stats.textUsageByTask.getValue("summary").reasoningTokens)
+        assertEquals(1, result.stats.textUsageByTask.getValue("ask").unreportedCalls)
+        assertEquals(0, MeetingJson.decode(JSONObject("""{"id":"old","createdAt":1,"audioPath":"old.wav"}""")).summaryUpTo)
+    }
+
+    @Test fun copyingAndSharingIncludeTranslationsSpeakersAndQuestions() {
+        val value = meeting().copy(qa = listOf(QaEntry("When?", "Tomorrow", 1)))
+        assertTrue(MeetingExport.transcript(value).contains("Alice: 决定明天交付"))
+        assertTrue(MeetingExport.transcript(value).contains("Deliver tomorrow"))
+        assertEquals("Q: When?\nA: Tomorrow", MeetingExport.questions(value))
+        assertTrue(MeetingExport.text(value, ExportFormat.Markdown).contains("Deliver tomorrow"))
+    }
+
+    @Test fun utterancesSkipSilenceKeepPreRollAndUseRecordingSampleClock() {
+        val segmenter = UtteranceSegmenter(1000, 10, 1.0)
+        assertTrue(segmenter.append(ShortArray(5000)).isEmpty())
+        assertTrue(segmenter.append(ShortArray(1000) { 1000 }).isEmpty())
+        val first = segmenter.append(ShortArray(1200)).single()
+        assertEquals(4700L, first.startSample); assertEquals(2500, first.samples.size)
+        assertTrue(segmenter.append(ShortArray(3000)).isEmpty())
+        assertTrue(segmenter.append(ShortArray(500) { 1000 }).isEmpty())
+        val last = segmenter.finish()!!
+        assertEquals(9900L, last.startSample); assertEquals(800, last.samples.size)
+        assertNull(segmenter.finish())
+    }
+
+    @Test fun longUtterancesRetainOverlapAndNeverRepeatTheFinalOverlapOnStop() {
+        val segmenter = UtteranceSegmenter(1000, 10, 1.0)
+        val first = segmenter.append(ShortArray(10000) { 1000 }).single()
+        assertEquals(0L, first.startSample); assertEquals(10000, first.samples.size)
+        assertNull(segmenter.finish())
+        val continuous = UtteranceSegmenter(1000, 10, 1.0)
+        val cuts = continuous.append(ShortArray(19500) { 1000 })
+        assertEquals(listOf(0L, 9000L), cuts.map { it.startSample })
+        val tail = continuous.finish()!!
+        assertEquals(18000L, tail.startSample); assertEquals(1500, tail.samples.size)
+    }
+
+    @Test fun utterancePauseFlushDoesNotInsertWallClockTimeOrUploadSilentRecording() {
+        val segmenter = UtteranceSegmenter(1000)
+        segmenter.append(ShortArray(1000) { 1000 })
+        assertEquals(0L, segmenter.finish()!!.startSample)
+        segmenter.append(ShortArray(1000) { 1000 })
+        assertEquals(1000L, segmenter.finish()!!.startSample)
+        segmenter.append(ShortArray(120000))
+        assertNull(segmenter.finish())
     }
 }

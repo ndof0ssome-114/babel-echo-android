@@ -83,6 +83,44 @@ class DeviceRegressionTest {
         } finally { store.delete(id) }
     }
 
+    @Test fun thinkingAndUtteranceSettingsPersistWithoutDroppingKeys() {
+        val settings = SecureSettings(context)
+        val original = settings.load()
+        try {
+            val edited = original.copy(liveUtterances = true, vadThreshold = 0.002, llmApiKey = "fixture-only", llmNoAuth = true,
+                textThinking = original.textThinking + ("minutes" to "enabled"),
+                textRoles = original.textRoles + ("summary" to TextRole("deepseek", "typed-model", "disabled")))
+            settings.save(edited)
+            val restored = SecureSettings(context).load()
+            assertTrue(restored.liveUtterances); assertEquals(0.002, restored.vadThreshold, 0.0)
+            assertEquals("fixture-only", restored.llmApiKey); assertTrue(restored.llmNoAuth)
+            assertEquals("enabled", restored.textThinking["minutes"])
+            assertEquals(TextRole("deepseek", "typed-model", "disabled"), restored.textRoles["summary"])
+        } finally { settings.save(original) }
+    }
+
+    @Test fun settingsDraftSurvivesActivityRecreationAndRecordingPermissionReservationCannotDuplicate() {
+        androidx.test.core.app.ActivityScenario.launch(MainActivity::class.java).use { activity ->
+            var original = AppSettings()
+            activity.onActivity {
+                val vm = androidx.lifecycle.ViewModelProvider(it)[MainViewModel::class.java]
+                original = vm.settingsDraft.value
+                vm.editSettings(original.copy(llmModel = "unsaved-draft-model"))
+                assertTrue(vm.reserveRecordingStart())
+                assertFalse(vm.reserveRecordingStart())
+                vm.cancelRecordingStart("Synthetic cancellation")
+                assertFalse(vm.state.value.isStarting)
+            }
+            activity.recreate()
+            activity.onActivity {
+                val vm = androidx.lifecycle.ViewModelProvider(it)[MainViewModel::class.java]
+                assertEquals("unsaved-draft-model", vm.settingsDraft.value.llmModel)
+                assertEquals(original, vm.state.value.settings)
+                vm.editSettings(original)
+            }
+        }
+    }
+
     private fun createAacFixture(output: File) {
         val rate = 32_000
         val encoder = MediaCodec.createEncoderByType("audio/mp4a-latm")

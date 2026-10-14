@@ -1,8 +1,8 @@
 # Babel Echo Android — AI implementation guide
 
-Last reviewed: 2026-10-14
+Last reviewed: 2026-10-15
 
-This document is the authoritative Android implementation guide. This standalone Android repository is synchronized from `apps/android` in the Babel Echo monorepo. Start with `README.md`, `PRIVACY.md`, and `SECURITY.md`. Paths here are relative to this repository root.
+This document is the authoritative Android implementation guide. This standalone repository is synchronized from `apps/android` in the Babel Echo monorepo. Start with `README.md`, `PRIVACY.md`, and `SECURITY.md`. Paths here are relative to this repository root.
 
 ## 1. Product scope
 
@@ -14,7 +14,7 @@ Babel Echo Android is a native Android 10+ meeting recorder and AI meeting works
 
 It stores a local PCM WAV recording and can use user-configured OpenAI-compatible endpoints for live transcription, translation, incremental summaries, structured minutes, and meeting Q&A.
 
-Current version: `0.2.0-alpha.6` (`versionCode 6`).
+Current version: `0.2.0-alpha.7` (`versionCode 7`).
 
 Application ID: `app.babelecho.android`.
 
@@ -702,4 +702,16 @@ Android 12+ `dataExtractionRules` excludes all app storage from cloud backup and
 
 2026-10-14 alpha.6 MuMu Android 15 smoke test: set Scaffold contentColor explicitly to the theme onSurface color. Transparent containers otherwise inherited a black LocalContentColor for titles outside cards, making history/settings headings unreadable in dark mode. Recording pause/resume, brief background capture, stop, playback seeking and history reload were exercised; WAV was 48 kHz mono PCM16, 98.796 seconds. Input peak was only 1/32768, so microphone signal quality/host mapping remains unverified. Four instrumentation checks passed on MuMu API 35.
 
-Standalone sync: alpha.6 is copied from babelecho-monorepo commit 69cbd3e. The authoritative desktop icon master remains in that repository; standalone Android stores the matching copy under `artwork/babel-echo-mascot-source.png`. Preserve this repository history when syncing; never import a nested source `.git` or monorepo history.
+## 24. Alpha.7: independent iOS alpha.3 reference (2026-10-15)
+
+Reference: https://github.com/ndof0ssome-114/babelecho-ios at `dd7c61e6b0984d307f47b09e2c7d9c0ca5871fe5`. Android changes remain native Kotlin/Compose; the reference checkout is read-only.
+
+- Settings drafts live in MainViewModel, survive navigation and Activity recreation, and are persisted only by top/bottom Save. Saving is guarded against capture/work/concurrent saves. Newer edits during saving remain in the draft. Draft keys are never serialized into saved-instance state.
+- Explicit GET `/models` uses the displayed draft endpoint/key/no-auth/HTTP choice. It sends no meeting data, deduplicates/sorts IDs and keeps the typed model unchanged. Each endpoint/auth snapshot owns its results; disposal or changes cancel its request and discard late results. Task provider changes reset model/thinking to a DeepSeek preset or blank custom-provider model.
+- `TextRole.thinking` and legacy `textThinking` are optional. Old saved roles retain provider defaults when absent; fresh summary/translation disable thinking. Only the exact official DeepSeek host receives `thinking.type`. Output ceilings follow iOS: normal 4096, minutes 8192, official DeepSeek thinking/default 16384. No model IDs are silently migrated.
+- No-auth requests omit saved keys in every ASR/text/list adapter. Text usage is saved before content validation; blank/null content and `finish_reason=length` preserve old documents without retries. `llmCalls` continues counting returned requests, including hierarchical and unusable responses. `textUsageByTask` stores calls, input/output, optional reasoning subset and incomplete-usage count; old meetings default to empty task usage. Never add reasoning to output totals or cost twice.
+- `summaryUpTo` persists the captured segment count after successful summary; retranscription resets it. Old meetings default to zero. Existing guards serialize live/manual operations; updates send previous summary plus only segments beyond the cursor.
+- Copy current panel includes timestamps, speakers and translations, or complete summary/minutes/Q&A. Translation and questions support text selection. Markdown sharing reuses MeetingExport including translations and Q&A.
+- `UtteranceSegmenter` ports iOS energy-based segmentation: RMS .003, 0.3-second pre-roll, 1.2-second silence, 0.25-second minimum utterance, configured maximum chunk/overlap and bounded buffer. Timestamps include recorded silence and exclude pauses. Stop/pause flush new voice, never finalized overlap. Silence remains in WAV and is not sent in this mode. Fresh settings select utterance mode but live ASR stays off; existing `chunk_seconds` preferences retain fixed chunks until explicitly changed. No stored meetings are rewritten.
+- Recording start is reserved before permission/projection UI to reject duplicate starts; cancellation releases it. Settings cannot be saved while reserved.
+- Remaining differences: no provisional 3-second live text and no JSON minutes document (structured Markdown is supported). Global speaker identity, real providers and physical microphone/system-audio/lock-screen behavior still need validation. See [alpha.7 testing](TESTING-alpha.7.md).

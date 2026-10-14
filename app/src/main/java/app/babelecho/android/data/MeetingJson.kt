@@ -15,6 +15,7 @@ object MeetingJson {
             .put("usedPlayback", meeting.usedPlayback)
             .put("transcript", meeting.transcript)
             .put("summary", meeting.summary)
+            .put("summaryUpTo", meeting.summaryUpTo)
             .put("minutes", meeting.minutes)
             .put("language", meeting.language)
             .put("translateTo", meeting.translateTo)
@@ -42,7 +43,14 @@ object MeetingJson {
                 .put("transcriptChars", meeting.stats.transcriptChars)
                 .put("asrSeconds", meeting.stats.asrSeconds)
                 .put("inputTokens", meeting.stats.inputTokens)
-                .put("outputTokens", meeting.stats.outputTokens))
+                .put("outputTokens", meeting.stats.outputTokens)
+                .put("textUsageByTask", JSONObject().apply {
+                    meeting.stats.textUsageByTask.forEach { (task, usage) ->
+                        put(task, JSONObject().put("calls", usage.calls).put("inputTokens", usage.inputTokens)
+                            .put("outputTokens", usage.outputTokens).put("reasoningTokens", usage.reasoningTokens)
+                            .put("unreportedCalls", usage.unreportedCalls))
+                    }
+                }))
     }
 
     fun decode(json: JSONObject): Meeting {
@@ -74,6 +82,7 @@ object MeetingJson {
                     usedPlayback = json.optBoolean("usedPlayback"),
                     transcript = json.optString("transcript"),
                     summary = json.optString("summary"),
+                    summaryUpTo = json.optInt("summaryUpTo").coerceIn(0, segments.size),
                     minutes = json.optString("minutes"),
                     language = json.optString("language", "auto"),
                     translateTo = json.optString("translateTo"),
@@ -88,6 +97,14 @@ object MeetingJson {
                         asrSeconds = stats.optDouble("asrSeconds", 0.0),
                         inputTokens = stats.optLong("inputTokens"),
                         outputTokens = stats.optLong("outputTokens"),
+                        textUsageByTask = stats.optJSONObject("textUsageByTask")?.let { tasks ->
+                            tasks.keys().asSequence().associateWith { task ->
+                                val item = tasks.getJSONObject(task)
+                                TextUsage(item.optInt("calls"), item.optLong("inputTokens"), item.optLong("outputTokens"),
+                                    if (item.has("reasoningTokens") && !item.isNull("reasoningTokens")) item.optLong("reasoningTokens") else null,
+                                    item.optInt("unreportedCalls"))
+                            }
+                        } ?: emptyMap(),
                     ),
                 )
     }

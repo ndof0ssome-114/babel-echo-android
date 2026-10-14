@@ -9,6 +9,8 @@ data class AppSettings(
     val asrNoAuth: Boolean = false,
     val asrKind: String = "openai",
     val liveTranscription: Boolean = false,
+    val liveUtterances: Boolean = true,
+    val vadThreshold: Double = 0.003,
     val autoMinutes: Boolean = true,
     val llmBaseUrl: String = "https://api.deepseek.com/v1",
     val llmModel: String = "deepseek-chat",
@@ -33,6 +35,7 @@ data class AppSettings(
     val useTextProfiles: Boolean = false,
     val textProfiles: List<TextProfile> = ProviderDefaults.text(),
     val textRoles: Map<String, TextRole> = ProviderDefaults.roles(),
+    val textThinking: Map<String, String?> = mapOf("summary" to "disabled", "translation" to "disabled"),
 ) {
     val hasAsr: Boolean get() = if (useAsrProfiles) asrProfiles.any { it.id == asrRoutes[asrLanguage] && it.configured && it.supports(asrLanguage) }
         else asrBaseUrl.isNotBlank() && asrModel.isNotBlank() && (asrNoAuth || asrApiKey.isNotBlank())
@@ -54,7 +57,8 @@ data class AppSettings(
         val profile = textProfiles.firstOrNull { it.id == role.provider && it.enabled && it.baseUrl.isNotBlank() && (it.noAuth || it.apiKey.isNotBlank()) }
         requireNotNull(profile) { "Configure the text provider for '$task'" }
         require(role.model.isNotBlank()) { "Configure the model for '$task'" }
-        return copy(useTextProfiles = false, llmBaseUrl = profile.baseUrl, llmApiKey = profile.apiKey, llmNoAuth = profile.noAuth) to role.model
+        return copy(useTextProfiles = false, llmBaseUrl = profile.baseUrl, llmApiKey = profile.apiKey, llmNoAuth = profile.noAuth,
+            textThinking = textThinking + (task to role.thinking)) to role.model
     }
 
     val asrDestination: String get() = if (useAsrProfiles) asrProfiles.firstOrNull { it.id == asrRoutes[asrLanguage] }?.baseUrl.orEmpty() else asrBaseUrl

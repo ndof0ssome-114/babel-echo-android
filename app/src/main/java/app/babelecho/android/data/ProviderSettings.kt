@@ -10,7 +10,20 @@ data class AsrProfile(
 }
 
 data class TextProfile(val id: String, val baseUrl: String, val enabled: Boolean = false, val apiKey: String = "", val noAuth: Boolean = false)
-data class TextRole(val provider: String, val model: String)
+data class TextRole(val provider: String, val model: String, val thinking: String? = null)
+
+object TextModelPolicy {
+    fun isDeepSeek(url: String): Boolean = runCatching {
+        java.net.URI(url.trim()).host.equals("api.deepseek.com", ignoreCase = true)
+    }.getOrDefault(false)
+
+    fun initial(provider: TextProfile, task: String): TextRole = TextRole(provider.id,
+        if (isDeepSeek(provider.baseUrl)) "deepseek-chat" else "",
+        if (isDeepSeek(provider.baseUrl) && task in setOf("summary", "translation")) "disabled" else null)
+
+    fun outputLimit(url: String, task: String, thinking: String?): Int =
+        if (isDeepSeek(url) && thinking != "disabled") 16_384 else if (task == "minutes") 8_192 else 4_096
+}
 
 object ProviderDefaults {
     fun asr() = listOf(
@@ -21,5 +34,7 @@ object ProviderDefaults {
     )
     fun text() = listOf(TextProfile("deepseek", "https://api.deepseek.com/v1"), TextProfile("mimo", "https://api.xiaomimimo.com/v1"), TextProfile("local", ""))
     fun routes() = mapOf("zh" to "groq", "ja" to "groq", "en" to "groq", "auto" to "groq")
-    fun roles() = listOf("summary", "minutes", "translation", "ask", "speaker").associateWith { TextRole("deepseek", "deepseek-chat") }
+    fun roles() = listOf("summary", "minutes", "translation", "ask", "speaker").associateWith {
+        TextRole("deepseek", "deepseek-chat", if (it in setOf("summary", "translation")) "disabled" else null)
+    }
 }

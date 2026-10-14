@@ -17,6 +17,7 @@ data class Meeting(
     val segments: List<TranscriptSegment> = emptyList(),
     val qa: List<QaEntry> = emptyList(),
     val stats: MeetingStats = MeetingStats(),
+    val summaryUpTo: Int = 0,
 )
 
 data class TranscriptSegment(
@@ -38,4 +39,8 @@ data class MeetingStats(
     val asrSeconds: Double = 0.0,
     val inputTokens: Long = 0,
     val outputTokens: Long = 0,
+    val textUsageByTask: Map<String, TextUsage> = emptyMap(),
 )
+
+data class TextUsage(val calls: Int = 0, val inputTokens: Long = 0, val outputTokens: Long = 0,
+    val reasoningTokens: Long? = null, val unreportedCalls: Int = 0)

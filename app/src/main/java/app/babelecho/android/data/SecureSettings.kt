@@ -24,6 +24,8 @@ class SecureSettings(context: Context) {
         asrNoAuth = prefs.getBoolean("asr_no_auth", false),
         asrKind = prefs.getString("asr_kind", "openai") ?: "openai",
         liveTranscription = prefs.getBoolean("live_transcription", false),
+        liveUtterances = prefs.getBoolean("live_utterances", !prefs.contains("chunk_seconds")),
+        vadThreshold = prefs.getString("vad_threshold", "0.003")?.toDoubleOrNull() ?: 0.003,
         autoMinutes = prefs.getBoolean("auto_minutes", true),
         llmBaseUrl = prefs.getString("llm_base_url", null) ?: AppSettings().llmBaseUrl,
         llmModel = prefs.getString("llm_model", null) ?: AppSettings().llmModel,
@@ -47,7 +49,12 @@ class SecureSettings(context: Context) {
         asrRoutes = ProviderDefaults.routes().mapValues { (language, default) -> prefs.getString("asr_route_$language", default) ?: default },
         useTextProfiles = prefs.getBoolean("use_text_profiles", false),
         textProfiles = readTextProfiles(),
-        textRoles = ProviderDefaults.roles().mapValues { (task, default) -> TextRole(prefs.getString("role_provider_$task", default.provider) ?: default.provider, prefs.getString("role_model_$task", default.model) ?: default.model) },
+        textRoles = ProviderDefaults.roles().mapValues { (task, default) -> TextRole(prefs.getString("role_provider_$task", default.provider) ?: default.provider,
+            prefs.getString("role_model_$task", default.model) ?: default.model,
+            prefs.getString("role_thinking_$task", if (prefs.contains("role_model_$task")) null else default.thinking)) },
+        textThinking = ProviderDefaults.roles().mapValues { (task, default) ->
+            prefs.getString("thinking_$task", if (prefs.contains("llm_base_url")) null else default.thinking)
+        },
     )
 
     fun save(value: AppSettings) {
@@ -57,11 +64,13 @@ class SecureSettings(context: Context) {
         }
         require(value.uiLanguage in setOf("zh", "ja", "en")) { "Unsupported interface language" }
         require(value.asrKind in setOf("openai", "mimo", "deepgram")) { "Unsupported ASR protocol" }
+        require(value.vadThreshold.isFinite() && value.vadThreshold in 0.0001..0.1) { "Voice threshold must be 0.0001–0.1" }
         require(listOf(value.asrPricePerHour, value.inputPricePerMillion, value.outputPricePerMillion).all { it.isFinite() && it >= 0 }) { "Prices must be finite and non-negative" }
         require(value.priceCurrency in setOf("USD", "CNY", "JPY")) { "Unsupported price currency" }
         require(value.autoSummarySeconds == 0 || value.autoSummarySeconds in 60..1_800) { "Auto summary must be off or 60–1800 seconds" }
         require(value.asrProfiles.map { it.id }.toSet() == ProviderDefaults.asr().map { it.id }.toSet()) { "Invalid ASR profiles" }
         require(value.textProfiles.map { it.id }.toSet() == ProviderDefaults.text().map { it.id }.toSet()) { "Invalid text profiles" }
+        require((value.textRoles.values.map { it.thinking } + value.textThinking.values).all { it == null || it in setOf("default", "enabled", "disabled") }) { "Unknown thinking mode" }
         val editor = prefs.edit()
             .putString("ui_language", value.uiLanguage)
             .putString("asr_base_url", value.asrBaseUrl.trim().trimEnd('/'))
@@ -71,6 +80,8 @@ class SecureSettings(context: Context) {
             .putBoolean("asr_no_auth", value.asrNoAuth)
             .putString("asr_kind", value.asrKind)
             .putBoolean("live_transcription", value.liveTranscription)
+            .putBoolean("live_utterances", value.liveUtterances)
+            .putString("vad_threshold", value.vadThreshold.toString())
             .putBoolean("auto_minutes", value.autoMinutes)
             .putString("llm_base_url", value.llmBaseUrl.trim().trimEnd('/'))
             .putString("llm_model", value.llmModel.trim())
@@ -104,7 +115,8 @@ class SecureSettings(context: Context) {
             }
         }.toString())
         value.asrRoutes.forEach { (language, provider) -> editor.putString("asr_route_$language", provider) }
-        value.textRoles.forEach { (task, role) -> editor.putString("role_provider_$task", role.provider).putString("role_model_$task", role.model.trim()) }
+        value.textRoles.forEach { (task, role) -> editor.putString("role_provider_$task", role.provider).putString("role_model_$task", role.model.trim()).putString("role_thinking_$task", role.thinking) }
+        ProviderDefaults.roles().keys.forEach { task -> editor.putString("thinking_$task", value.textThinking[task]) }
         editor.apply()
     }
 

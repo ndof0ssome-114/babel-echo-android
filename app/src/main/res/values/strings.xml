@@ -4,4 +4,5 @@
     <string name="notification_channel">录音</string>
     <string name="notification_recording">正在录制会议声音</string>
     <string name="notification_stop">停止录音</string>
+    <string name="notification_minutes">录音已保存，正在生成会议纪要</string>
 </resources>

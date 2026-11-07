@@ -23,7 +23,7 @@ object TextModelPolicy {
         if (isDeepSeek(provider.baseUrl) && task in setOf("summary", "translation")) "disabled" else null)
 
     fun outputLimit(url: String, task: String, thinking: String?): Int =
-        if (isDeepSeek(url) && thinking != "disabled") 16_384 else if (task == "minutes") 8_192 else 4_096
+        if (task == "minutes" || (isDeepSeek(url) && thinking != "disabled")) 16_384 else 4_096
 }
 
 object ProviderDefaults {

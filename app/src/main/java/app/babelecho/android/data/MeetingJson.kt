@@ -16,6 +16,8 @@ object MeetingJson {
             .put("transcript", meeting.transcript)
             .put("summary", meeting.summary)
             .put("summaryUpTo", meeting.summaryUpTo)
+            .put("mode", meeting.mode)
+            .put("notesDetail", meeting.notesDetail)
             .put("minutes", meeting.minutes)
             .put("language", meeting.language)
             .put("translateTo", meeting.translateTo)
@@ -83,6 +85,8 @@ object MeetingJson {
                     transcript = json.optString("transcript"),
                     summary = json.optString("summary"),
                     summaryUpTo = json.optInt("summaryUpTo").coerceIn(0, segments.size),
+                    mode = NotesPrompts.normalizeMode(json.optString("mode")),
+                    notesDetail = NotesPrompts.normalizeDetail(json.optString("notesDetail")),
                     minutes = json.optString("minutes"),
                     language = json.optString("language", "auto"),
                     translateTo = json.optString("translateTo"),

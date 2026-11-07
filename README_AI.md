@@ -1,8 +1,8 @@
 # Babel Echo Android — AI implementation guide
 
-Last reviewed: 2026-10-15
+Last reviewed: 2026-11-04
 
-This document is the authoritative Android implementation guide. This standalone repository is synchronized from `apps/android` in the Babel Echo monorepo. Start with `README.md`, `PRIVACY.md`, and `SECURITY.md`. Paths here are relative to this repository root.
+This document is the authoritative Android implementation guide. Read the monorepo root `README_AI.md` first. Paths here are relative to `apps/android`.
 
 ## 1. Product scope
 
@@ -65,7 +65,7 @@ Other important files:
 
 - `app/build.gradle.kts`: application ID, SDK levels, version, build types, dependencies.
 - `gradle/libs.versions.toml`: dependency/plugin versions.
-- `.github/workflows/android.yml`: known-good CI environment and commands.
+- Repository-root `.github/workflows/android-ci.yml`: known-good CI environment and commands (assemble, lint, JVM unit tests, APK signature). GitHub ignores workflows inside `apps/android/.github`.
 - `artwork/`: Android copies of the desktop/master brand artwork.
 - `PRIVACY.md`: user-facing data flow; update whenever network behavior changes.
 - `SECURITY.md`: credential and vulnerability guidance.
@@ -236,20 +236,24 @@ Playback capture limitations are platform-enforced. Silent playback capture can 
 
 ### 7.4 Reader threads
 
-Each `AudioRecord` reader copies frames into a bounded queue. If full, the oldest frame is dropped before inserting the newest. This keeps memory bounded but may create discontinuities under sustained overload; any queue-size change needs long-session testing.
+Each `AudioRecord` reader tags every block with its source index and its position on that source's own sample timeline (`PcmFrame`), then offers it to one queue shared by all sources (250 frames, about 2.5 s for two sources). A full queue drops the frame; the mixer sees the position gap and inserts that much silence, so later audio from that source is never pulled earlier. The first gap in a session raises a single user-visible warning.
 
 ### 7.5 Mixer
 
-The current mixer aligns available microphone/playback frames and adds sample values with saturation to signed 16-bit range.
+`PcmMixer.kt` is a pure-Kotlin class covered by `PcmMixerTest` (JVM). The mixer thread blocks on the shared queue, drains everything available, and mixes by sample position:
 
-Risks:
+- sources start together at 48 kHz, so sample counts are the shared clock; frames are aligned by position, never by arrival order;
+- output is written only up to the position every source has reached, so one slow poll does not insert silence into the other source;
+- a source more than 250 ms behind (stalled or silent capture) is padded with silence so the other source is not held back; clock drift therefore turns into small silences in the slower source instead of dropped audio;
+- two or more sources go through a soft limiter (unchanged below 75 % full scale, asymptotic above it) instead of hard clipping; a single source is written unchanged;
+- while paused, buffered audio is discarded and the sources realign at the next frames;
+- at stop, everything buffered is flushed with silence padding.
 
-- two loud sources can clip;
-- independently polled sources can drift;
-- missing frames from one source become silence for that frame;
-- a better mixer may need gain control and timestamp-aware alignment.
+Still missing: automatic gain control, source balance controls and drift resampling.
 
 During pause, the service continues draining capture sources but does not write mixed PCM or send it to live ASR.
+
+`wavWriter`, `liveCloud`, `liveTranscriber`, `processing` and `mediaProjection` are shared across the main, reader, mixer, live-ASR and stop threads; they are `@Volatile`, writes and close of the WAV share `writerLock`, and error de-duplication in `broadcastState` is synchronized.
 
 ### 7.6 Audio meter
 
@@ -260,6 +264,10 @@ The meter is based on average absolute sample magnitude and is broadcast at a re
 Stop is guarded by `stopping.compareAndSet(false, true)`. All stop paths, including MediaProjection revocation, converge on `stopCapture`.
 
 Join durations are bounded. Avoid infinite waits on network calls inside service shutdown.
+
+Readers are joined before `readersDone` is set; the mixer exits only after that flag and an empty queue, so frames read just before stop are still written.
+
+Automatic minutes run after the WAV is closed and capture is released. The foreground notification changes to "recording saved; generating minutes" (no stop action, indeterminate progress) and a watchdog cancels the request after 90 seconds, so the service no longer holds a "recording" notification for the full 150 s OkHttp call timeout.
 
 ## 8. WAV writer
 
@@ -572,7 +580,7 @@ For recorded fixtures, inspect:
 
 1. Update `versionCode` and `versionName` in `app/build.gradle.kts`.
 2. Update version in README.
-3. Update CI artifact name if the workflow remains version-specific.
+3. CI derives the artifact name from `versionName`; no workflow edit is needed.
 4. Run assemble + lint.
 5. Verify APK signature.
 6. Scan for sensitive information.
@@ -632,7 +640,7 @@ Do not reuse a release tag for different APK bytes. Increment the alpha version 
 - No production signing pipeline.
 - No Play Store AAB/release process.
 - Speaker labels are placeholders; no true diarization.
-- Mixer lacks automatic gain control and timestamp-based drift correction.
+- Mixer aligns by sample position and soft-limits, but lacks automatic gain control and drift resampling (drift becomes short silences in the slower source).
 - Identical live errors are suppressed for 30 seconds; provider-specific retry/backoff still needs real-account validation.
 - Meeting store lookup can be optimized for long histories.
 - Transcript segments use lazy keyed rows; large individual model outputs may still require memory checks.
@@ -702,9 +710,26 @@ Android 12+ `dataExtractionRules` excludes all app storage from cloud backup and
 
 2026-10-14 alpha.6 MuMu Android 15 smoke test: set Scaffold contentColor explicitly to the theme onSurface color. Transparent containers otherwise inherited a black LocalContentColor for titles outside cards, making history/settings headings unreadable in dark mode. Recording pause/resume, brief background capture, stop, playback seeking and history reload were exercised; WAV was 48 kHz mono PCM16, 98.796 seconds. Input peak was only 1/32768, so microphone signal quality/host mapping remains unverified. Four instrumentation checks passed on MuMu API 35.
 
-## 24. Alpha.7: independent iOS alpha.3 reference (2026-10-15)
+## 24. Mixer rework (2026-11-04)
 
-Reference: https://github.com/ndof0ssome-114/babelecho-ios at `dd7c61e6b0984d307f47b09e2c7d9c0ca5871fe5`. Android changes remain native Kotlin/Compose; the reference checkout is read-only.
+Replaced the per-source 12-frame queues (about 240 ms, oldest frame dropped when full) and arrival-order pairing with position-tagged frames, one shared 250-frame queue and `PcmMixer` (sections 7.4, 7.5). Also: soft limiter instead of hard clipping, cross-thread fields made volatile/locked, and a 90 s cap plus honest notification for stop-time minutes (section 7.7). Meeting JSON and WAV format are unchanged.
+
+Verified: `PcmMixerTest` (8 JVM tests, including a randomized jitter test that requires every sample in place) compiled and run with Kotlin 2.2.10 on JDK 17. `RecordingService.kt` was not compiled locally (no Android SDK); rely on `android-ci.yml` for assemble, lint and unit tests.
+
+Physical-device plan (pending):
+
+1. Microphone only, 10 minutes: duration matches wall clock within 0.1 %, no audible dropouts.
+2. Playback only with a capturable media app: same checks; pause the media for 30 s mid-recording and confirm the timeline does not shrink.
+3. Mixed, 30 minutes with speech over music: no gap warning, no audible clicks, speech and music stay in sync at start and end.
+4. Mixed with loud music and loud speech: peaks stay below full scale and no hard-clipping crackle.
+5. Pause/resume 5 times in mixed mode: durations add up, no stale audio replayed after resume.
+6. Background plus locked screen for 10 minutes in mixed mode.
+7. Stop with automatic minutes enabled: notification switches to "generating minutes" without a stop button; with an unreachable LLM, the notification clears within about 90 s and the error is shown.
+8. Revoke projection from the system UI during mixed recording: WAV ends cleanly.
+
+## 25. Alpha.7: independent iOS alpha.3 reference (2026-10-15)
+
+Ported into the monorepo from the standalone `babel-echo-android` repository (2026-11). Reference: https://github.com/ndof0ssome-114/babelecho-ios at `dd7c61e6b0984d307f47b09e2c7d9c0ca5871fe5`. Android changes remain native Kotlin/Compose; the reference checkout is read-only.
 
 - Settings drafts live in MainViewModel, survive navigation and Activity recreation, and are persisted only by top/bottom Save. Saving is guarded against capture/work/concurrent saves. Newer edits during saving remain in the draft. Draft keys are never serialized into saved-instance state.
 - Explicit GET `/models` uses the displayed draft endpoint/key/no-auth/HTTP choice. It sends no meeting data, deduplicates/sorts IDs and keeps the typed model unchanged. Each endpoint/auth snapshot owns its results; disposal or changes cancel its request and discard late results. Task provider changes reset model/thinking to a DeepSeek preset or blank custom-provider model.
@@ -727,3 +752,14 @@ Reference implementations: desktop `public/app.js` (`providerCard`, `modelPicker
 - `ProviderJson` persists only metadata, including new optional label/languages. Old arrays without those fields use defaults. Custom providers have stable validated IDs, unique within each category (up to 24); they survive restart. Removed provider encrypted-key entries are removed on Save. Routes/tasks referring to a removed service remain unconfigured until reassigned; no silent fallback. Missing/deleted providers are not recreated by decoding.
 - User-defined credentials remain separately encrypted in Keystore-backed preferences. No meetings/audio are used for configuration/discovery, and settings drafts do not serialize keys into saved-instance state.
 - Verification and concrete UI evidence are in [alpha.8 testing](TESTING-alpha.8.md). This update changes configuration UX and compatibility, not microphone/system capture behavior.
+
+## 26. 2026-11 code review fixes
+
+- **Live text worker**: translation and the rolling summary moved from the live ASR thread to `recording/LiveTextWorker.kt` (single-thread executor, separate `CloudClient`). Previously a slow summary request blocked recognition until the ~36 s live audio queue overflowed and live transcription switched off for the rest of the meeting. Segments are stored immediately with empty translations; failed translations are retried with the next batch up to 3 times per segment. Stop waits up to 30 s for queued text work before minutes.
+- **16 kHz uploads**: live chunks are downsampled 48 → 16 kHz (`RecordingService.downsampleForUpload`, 3-sample average as a simple low-pass) before upload. The local WAV stays 48 kHz.
+- **Retries**: `CloudClient.execute` retries 408/425/429/5xx up to 3 attempts, honouring `Retry-After` (≤ 30 s). Network errors and timeouts are not retried (they may already be billed). Rules live in `cloud/NetworkPolicy.kt`.
+- **Plain HTTP**: even with “allow insecure HTTP” on, only loopback, RFC1918, link-local, CGNAT, `.local`/`.lan`, single-label hosts and IPv6 ULA/link-local are accepted. `usesCleartextTraffic="true"` stays because Network Security Config cannot express IP ranges; the app-level check is the boundary.
+- **Stop-time minutes timeout**: 90 s → 240 s.
+- **Not changed on purpose**: `PcmMixer` keeps appending a stalled source after its silence padding (`stalledSourceIsPaddedOnlyAfterTheLagLimit`). This keeps real-time alignment when a source genuinely produced nothing, but shifts that source if it later delivers a backlog. Decide from device evidence (mixed recording, pause media 30 s) before changing it.
+
+Verified locally with SDK 36 / JDK 21: `:app:assembleDebug`, `:app:testDebugUnitTest` (47 tests incl. new `ReviewFixesTest`), `:app:lintDebug`. Device checks are listed in `docs/HANDOFF_2026-11_REVIEW_FIXES.md`.

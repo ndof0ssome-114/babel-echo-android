@@ -175,7 +175,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun summarize(meeting: Meeting) = launchMeetingWork(meeting.id) {
-        val summary = cloud(meeting.id).summarize(meeting.transcript, _state.value.settings)
+        val summary = cloud(meeting.id).summarize(meeting, _state.value.settings)
         store.update(meeting.id) { it.copy(summary = summary, summaryUpTo = meeting.segments.size) }
     }
 
@@ -208,6 +208,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         store.update(meeting.id) { it.copy(segments = it.segments.map { segment -> if (segment.speaker == original) segment.copy(speaker = name.trim()) else segment }) }
     }
 
+    /** Give one sentence a different (possibly new) speaker, like the desktop speaker menu. */
+    fun setSegmentSpeaker(meeting: Meeting, segmentId: Int, name: String) = launchMeetingWork(meeting.id) {
+        val label = name.trim().take(60)
+        require(label.isNotBlank()) { "Speaker name cannot be blank" }
+        store.update(meeting.id) { it.copy(segments = it.segments.map { segment -> if (segment.id == segmentId) segment.copy(speaker = label) else segment }) }
+    }
+
+    /** Scene and notes detail of one meeting; existing notes are kept until regenerated (desktop behaviour). */
+    fun setNoteOptions(meeting: Meeting, mode: String, notesDetail: String) = launchMeetingWork(meeting.id) {
+        store.update(meeting.id) { it.copy(mode = NotesPrompts.normalizeMode(mode), notesDetail = NotesPrompts.normalizeDetail(notesDetail)) }
+    }
+
     fun renameMeeting(meeting: Meeting, title: String) {
         if (title.isBlank()) return
         viewModelScope.launch {
@@ -236,7 +248,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runCatching { context.contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
         }
         var meeting = Meeting(id, title, System.currentTimeMillis(), duration, audio.absolutePath, false, false,
-            language = _state.value.settings.asrLanguage, stats = MeetingStats(audioSeconds = duration / 1_000))
+            language = _state.value.settings.asrLanguage, stats = MeetingStats(audioSeconds = duration / 1_000),
+            mode = _state.value.settings.noteMode, notesDetail = _state.value.settings.notesDetail)
         store.save(meeting)
         // Selection is updated on the main dispatcher; all file/model work remains off the UI thread.
         withContext(Dispatchers.Main) { _state.value = _state.value.copy(selectedMeetingId = id, workingMeetingId = id) }

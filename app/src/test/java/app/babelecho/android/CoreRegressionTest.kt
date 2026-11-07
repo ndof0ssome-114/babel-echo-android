@@ -114,10 +114,11 @@ class CoreRegressionTest {
 
     @Test fun retranscriptionReturnsTimedSegmentsAndCountsEachRequest() = runBlocking {
         MockWebServer().use { server ->
-            server.start(); server.enqueue(asr("first phrase")); server.enqueue(asr("second phrase")); server.enqueue(asr("third phrase"))
+            server.start(); server.enqueue(asr("first phrase.")); server.enqueue(asr("second phrase.")); server.enqueue(asr("third phrase."))
             val usages = mutableListOf<ModelUsage>()
             val segments = CloudClient(temp.root) { usages += it }.transcribeSegments(wav(), settings(server))
-            assertEquals(listOf(0L, 8_000L, 16_000L), segments.map { it.startMs })
+            // Overlapping audio belongs to the previous chunk (desktop overlapUntil), so later starts move to its end.
+            assertEquals(listOf(0L, 10_000L, 18_000L), segments.map { it.startMs })
             assertEquals(listOf(0, 1, 2), segments.map { it.id })
             assertEquals(3, usages.sumOf { it.asrCalls })
             assertEquals(25.0, usages.sumOf { it.asrSeconds }, 0.01)
@@ -127,7 +128,9 @@ class CoreRegressionTest {
 
     @Test fun failedChunkCannotReturnPartialReplacementAndCleansCache() = runBlocking {
         MockWebServer().use { server ->
-            server.start(); server.enqueue(asr("first phrase")); server.enqueue(MockResponse().setResponseCode(429).setBody("rate limited"))
+            server.start(); server.enqueue(asr("first phrase"))
+            // 429 is retried; it still fails once every attempt is rate limited.
+            repeat(3) { server.enqueue(MockResponse().setResponseCode(429).setBody("rate limited")) }
             assertTrue(runCatching { CloudClient(temp.root).transcribeSegments(wav(), settings(server)) }.isFailure)
             assertTrue(temp.root.listFiles()!!.none { it.name.startsWith("babel-asr-") })
             assertEquals("决定明天交付", meeting().transcript)
@@ -184,12 +187,18 @@ class CoreRegressionTest {
 
     @Test fun textTokenUsageIsReportedAndMinutesHandleLongMeetings() = runBlocking {
         MockWebServer().use { server ->
-            server.start(); repeat(4) { server.enqueue(chat("Useful summary")) }
+            // Like desktop, a 30k-character transcript is sent whole in one request.
+            server.enqueue(chat("Useful minutes"))
             val usages = mutableListOf<ModelUsage>()
             CloudClient(temp.root) { usages += it }.createMinutes(meeting().copy(segments = emptyList(), transcript = "a".repeat(30_000)), settings(server))
-            assertEquals(4, usages.sumOf { it.llmCalls })
-            assertEquals(160L, usages.sumOf { it.inputTokens })
-            repeat(4) { assertTrue(server.takeRequest().body.readUtf8().length < 25_500) }
+            assertEquals(1, usages.sumOf { it.llmCalls })
+            assertEquals(40L, usages.sumOf { it.inputTokens })
+            assertTrue(server.takeRequest().body.readUtf8().contains("a".repeat(30_000)))
+            // Beyond the full-transcript limit it is condensed first: rolling summary chunks, then minutes.
+            repeat(7) { server.enqueue(chat("Useful summary")) }
+            CloudClient(temp.root) { usages += it }.createMinutes(meeting().copy(segments = emptyList(), transcript = "b".repeat(130_000)), settings(server))
+            assertEquals(1 + 7, usages.sumOf { it.llmCalls })
+            repeat(6) { assertTrue(server.takeRequest().body.readUtf8().length < 40_000) }
         }
     }
 
@@ -243,7 +252,7 @@ class CoreRegressionTest {
             var usage = ModelUsage()
             CloudClient(temp.root) { usage = it }.createMinutes(meeting(), settings(server).copy(textThinking = mapOf("minutes" to "enabled")))
             val body = JSONObject(server.takeRequest().body.readUtf8())
-            assertFalse(body.has("thinking")); assertEquals(8192, body.getInt("max_tokens"))
+            assertFalse(body.has("thinking")); assertEquals(16_384, body.getInt("max_tokens"))
             assertEquals(1, usage.unreportedCalls); assertNull(usage.reasoningTokens)
         }
     }
@@ -254,7 +263,7 @@ class CoreRegressionTest {
         assertFalse(TextModelPolicy.isDeepSeek("https://example.com/api.deepseek.com"))
         assertEquals(16384, TextModelPolicy.outputLimit("https://api.deepseek.com/v1", "summary", null))
         assertEquals(4096, TextModelPolicy.outputLimit("https://api.deepseek.com/v1", "summary", "disabled"))
-        assertEquals(8192, TextModelPolicy.outputLimit("https://api.deepseek.com/v1", "minutes", "disabled"))
+        assertEquals(16_384, TextModelPolicy.outputLimit("https://api.deepseek.com/v1", "minutes", "disabled"))
         val changed = TextModelPolicy.initial(TextProfile("local", "http://localhost:1234/v1"), "summary")
         assertEquals("", changed.model); assertNull(changed.thinking)
         val old = TextRole("deepseek", "my-old-model")

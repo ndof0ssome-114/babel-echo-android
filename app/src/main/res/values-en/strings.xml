@@ -4,4 +4,5 @@
     <string name="notification_channel">Recording</string>
     <string name="notification_recording">Recording meeting audio</string>
     <string name="notification_stop">Stop recording</string>
+    <string name="notification_minutes">Recording saved; generating meeting minutes</string>
 </resources>

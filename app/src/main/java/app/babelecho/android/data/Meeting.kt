@@ -18,6 +18,10 @@ data class Meeting(
     val qa: List<QaEntry> = emptyList(),
     val stats: MeetingStats = MeetingStats(),
     val summaryUpTo: Int = 0,
+    /** "meeting" or "class" (desktop scene mode). */
+    val mode: String = "meeting",
+    /** "standard" or "detailed" notes (desktop notesDetail). */
+    val notesDetail: String = "detailed",
 )
 
 data class TranscriptSegment(

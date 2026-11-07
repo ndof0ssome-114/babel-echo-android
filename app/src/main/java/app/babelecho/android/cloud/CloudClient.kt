@@ -3,6 +3,10 @@ package app.babelecho.android.cloud
 import android.content.Context
 import app.babelecho.android.data.AppSettings
 import app.babelecho.android.data.Meeting
+import app.babelecho.android.data.MinutesRenderer
+import app.babelecho.android.data.NotesPrompts
+import app.babelecho.android.data.Sentences
+import app.babelecho.android.data.TranscriptAssembler
 import app.babelecho.android.data.TranscriptSegment
 import app.babelecho.android.data.TextModelPolicy
 import kotlinx.coroutines.Dispatchers
@@ -56,18 +60,26 @@ class CloudClient(private val cacheDirectory: File, private val onUsage: (ModelU
     suspend fun transcribeSegments(audio: File, settings: AppSettings): List<TranscriptSegment> = withContext(Dispatchers.IO) {
         val chunks = WavChunker.split(audio, cacheDirectory, settings.chunkSeconds, settings.overlapSeconds)
         try {
-            val result = mutableListOf<TranscriptSegment>()
+            // Same sentence assembly as live recording and desktop: cut sentences are rejoined,
+            // short ones grouped, and text heard twice in the chunk overlap is dropped.
+            val assembler = TranscriptAssembler(emptyList())
+            var result = emptyList<TranscriptSegment>()
             var previous = ""
+            var previousEnd = 0L
             chunks.forEachIndexed { index, chunk ->
                 val start = index * (settings.chunkSeconds - settings.overlapSeconds) * 1_000L
+                val overlapUntil = if (index > 0) previousEnd else null
                 val received = transcribeResult(chunk, settings, previous)
                 received.forEach { item ->
-                    val clean = removeOverlap(previous, item.text)
+                    val absoluteStart = start + item.startMs
+                    val absoluteEnd = start + item.endMs
+                    val clean = if (overlapUntil != null && absoluteStart < overlapUntil) Sentences.trimRepeatedPrefix(previous, item.text) else item.text.trim()
                     if (clean.isNotBlank()) {
-                        result += item.copy(id = result.size, startMs = start + item.startMs, endMs = start + item.endMs, text = clean)
+                        result = assembler.add(clean, maxOf(absoluteStart, overlapUntil ?: absoluteStart), absoluteEnd, item.speaker).apply(result)
                         previous = (previous + "\n" + clean).takeLast(240)
                     }
                 }
+                previousEnd = start + WavChunker.durationMs(chunk)
             }
             require(result.isNotEmpty()) { "No speech recognized; the recording and previous transcript were preserved" }
             result
@@ -142,68 +154,66 @@ class CloudClient(private val cacheDirectory: File, private val onUsage: (ModelU
         return segments.ifEmpty { if (text.isBlank()) emptyList() else listOf(TranscriptSegment(0, 0, duration, speaker = "Speaker 1", text = text)) }
     }
 
-    suspend fun summarize(transcript: String, settings: AppSettings): String = withContext(Dispatchers.IO) {
-        require(transcript.isNotBlank()) { "Transcribe this recording first" }
+    /** Full summary of a transcript; long text is folded in rolling chunks, like the live summary. */
+    suspend fun summarize(transcript: String, settings: AppSettings): String = summarize(
+        Meeting("", "", 0, 0, "", true, false, transcript = transcript), settings)
 
-        val parts = transcript.chunked(24_000)
-        if (parts.size == 1) {
-            chat(settings, settings.summaryModel, SUMMARY_PROMPT, transcript, "summary")
-        } else {
-            val partials = parts.mapIndexed { index, part ->
-                chat(
-                    settings,
-                    settings.summaryModel,
-                    "Summarize part ${index + 1} of ${parts.size}. Preserve names, decisions, numbers, and action items. Do not invent details.",
-                    part, "summary",
-                )
-            }
-            chat(settings, settings.summaryModel, SUMMARY_PROMPT, partials.joinToString("\n\n---\n\n"), "summary")
+    suspend fun summarize(meeting: Meeting, settings: AppSettings): String = withContext(Dispatchers.IO) {
+        val segments = meeting.segments.ifEmpty {
+            require(meeting.transcript.isNotBlank()) { "Transcribe this recording first" }
+            listOf(TranscriptSegment(0, 0, meeting.durationMs, text = meeting.transcript))
         }
+        // Same incremental shape as desktop: previous summary + the next slice of transcript.
+        var summary = ""
+        for (part in chunkSegments(segments, SUMMARY_CHUNK_CHARS)) {
+            val prompt = NotesPrompts.summary(summary, part, settings.summaryMaxChars, meeting.title, meeting.mode)
+            summary = chat(settings, settings.summaryModel, prompt.system, prompt.user, "summary")
+        }
+        summary
     }
 
-    suspend fun updateSummary(previous: String, newSegments: List<TranscriptSegment>, settings: AppSettings): String =
-        withContext(Dispatchers.IO) {
-            val added = renderSegments(newSegments)
-            chat(
-                settings,
-                settings.summaryModel,
-                """You maintain a concise live meeting summary. Use only stated facts. Return the complete updated summary in the transcript's primary language using short Markdown headings and bullets. Preserve names, numbers, dates, decisions, disagreements, and unresolved items. Do not describe the update process.""",
-                "已有摘要：\n${previous.ifBlank { "（暂无）" }}\n\n新增转写：\n$added", "summary",
-            )
-        }
+    suspend fun updateSummary(previous: String, newSegments: List<TranscriptSegment>, settings: AppSettings,
+                              title: String = "", mode: String = NotesPrompts.MODE_MEETING): String = withContext(Dispatchers.IO) {
+        val prompt = NotesPrompts.summary(previous, newSegments, settings.summaryMaxChars, title, mode)
+        chat(settings, settings.summaryModel, prompt.system, prompt.user, "summary")
+    }
 
+    /**
+     * Structured notes in the desktop schema, rendered to Markdown. A reply that is not JSON is
+     * kept as the model wrote it rather than discarded.
+     */
     suspend fun createMinutes(meeting: Meeting, settings: AppSettings): String = withContext(Dispatchers.IO) {
-        val full = if (meeting.segments.isNotEmpty()) renderSegments(meeting.segments) else meeting.transcript
+        val full = if (meeting.segments.isNotEmpty()) NotesPrompts.renderTranscript(meeting.segments) else meeting.transcript
         require(full.isNotBlank()) { "Transcribe this recording first" }
-        val transcript = if (full.length > 24_000) summarize(full, settings) else full
-        chat(
-            settings,
-            settings.minutesModel,
-            """You write rigorous structured meeting minutes in the transcript's primary language. Use only the transcript. Return Markdown with: meeting overview, participants, key points, decisions, action items (owner and due date only when stated), risks or disagreements, unresolved questions, and 2–6 timestamped chapters. Never invent missing details.""",
-            "会议标题：${meeting.title}\n\n实时摘要：\n${meeting.summary}\n\n完整转写：\n$transcript", "minutes",
-        )
+        // Desktop sends the whole transcript. Only beyond what a typical context window holds is
+        // it replaced by a rolling summary, and the prompt says so.
+        val transcript = if (full.length > MINUTES_FULL_CHARS) "（转写过长，以下为按顺序整理的完整要点）\n" + summarize(meeting, settings) else full
+        val target = meeting.language.takeUnless { it.isBlank() || it == "auto" } ?: "zh"
+        val prompt = NotesPrompts.minutes(transcript, meeting.title, meeting.summary, target, meeting.mode, meeting.notesDetail)
+        val raw = chat(settings, settings.minutesModel, prompt.system, prompt.user, "minutes")
+        MinutesRenderer.parse(raw)?.let { MinutesRenderer.render(it, meeting.mode, settings.uiLanguage) } ?: raw
     }
 
     suspend fun ask(meeting: Meeting, question: String, settings: AppSettings): String = withContext(Dispatchers.IO) {
         require(question.isNotBlank()) { "Question cannot be empty" }
-        val transcript = if (meeting.segments.isNotEmpty()) renderSegments(meeting.segments) else meeting.transcript
-        val history = meeting.qa.takeLast(4).joinToString("\n") { "Q: ${it.question}\nA: ${it.answer}" }
-        chat(
-            settings,
-            settings.askModel,
-            """Answer only from the supplied meeting record. If the answer is absent, say so directly. Keep the answer concise and cite timestamps such as (12:34). Never invent facts.""",
-            "摘要：\n${meeting.summary}\n\n转写：\n$transcript\n\n此前问答：\n$history\n\n问题：$question", "ask",
-        )
+        val transcript = if (meeting.segments.isNotEmpty()) NotesPrompts.renderTranscript(meeting.segments) else meeting.transcript
+        val prompt = NotesPrompts.ask(question, transcript, meeting.summary, meeting.qa.map { it.question to it.answer })
+        chat(settings, settings.askModel, prompt.system, prompt.user, "ask")
     }
 
-    suspend fun translateSegments(segments: List<TranscriptSegment>, target: String, settings: AppSettings): List<String> =
+    /**
+     * Translates in batches of 20 with the two preceding sentences as context (desktop behaviour).
+     * [context] is the text just before the first segment, for live use.
+     */
+    suspend fun translateSegments(segments: List<TranscriptSegment>, target: String, settings: AppSettings,
+                                  context: List<String> = emptyList()): List<String> =
         withContext(Dispatchers.IO) {
             if (segments.isEmpty() || target.isBlank()) return@withContext emptyList()
             val translations = mutableMapOf<Int, String>()
-            segments.chunked(32).forEach { batch ->
-                val input = JSONArray().apply { batch.forEach { put(JSONObject().put("id", it.id).put("text", it.text)) } }
-                val raw = chat(settings, settings.translateModel,
-                    "Translate every segment into language code '$target'. Preserve meaning and names. Return only JSON: {\"translations\":[{\"id\":1,\"text\":\"...\"}]}", input.toString(), "translation")
+            var before = context.takeLast(2)
+            segments.chunked(TRANSLATE_BATCH).forEach { batch ->
+                val prompt = NotesPrompts.translate(batch.map { it.id to it.text }, target, before)
+                val raw = chat(settings, settings.translateModel, prompt.system, prompt.user, "translation")
                 val array = JSONObject(extractJson(raw)).getJSONArray("translations")
                 val byId = (0 until array.length()).associate { index ->
                     val item = array.getJSONObject(index)
@@ -213,20 +223,47 @@ class CloudClient(private val cacheDirectory: File, private val onUsage: (ModelU
                     "Translation response has missing or duplicate IDs; previous translations were preserved"
                 }
                 translations.putAll(byId)
+                before = batch.takeLast(2).map { it.text }
             }
             segments.map { translations.getValue(it.id) }
         }
 
+    /** Text-only speaker attribution in batches of 150, keeping labels consistent across batches. */
     suspend fun resplitSpeakers(segments: List<TranscriptSegment>, settings: AppSettings): Map<Int, String> = withContext(Dispatchers.IO) {
         require(segments.isNotEmpty()) { "Transcribe this recording first" }
-        val input = JSONArray().apply { segments.forEach { put(JSONObject().put("id", it.id).put("text", it.text).put("speaker", it.speaker)) } }
-        require(input.toString().length < 24_000) { "This meeting is too long for automatic speaker labeling; rename speakers manually" }
-        val raw = chat(settings, settings.askModel,
-            "Assign likely speaker labels from the text only, keeping labels when uncertain. Do not invent participant names. Return only JSON: {\"speakers\":[{\"id\":1,\"speaker\":\"Speaker 1\"}]}. Include every supplied ID once.", input.toString(), "speaker")
-        val array = JSONObject(extractJson(raw)).getJSONArray("speakers")
-        val map = (0 until array.length()).associate { i -> array.getJSONObject(i).let { it.getInt("id") to it.getString("speaker").trim() } }
-        require(array.length() == segments.size && map.keys == segments.map { it.id }.toSet() && map.values.all { it.isNotBlank() }) { "Invalid speaker labels; original labels were preserved" }
-        map
+        val known = linkedSetOf<String>().apply { segments.forEach { add(it.speaker) } }
+        val labels = mutableMapOf<Int, String>()
+        segments.chunked(RESPLIT_BATCH).forEach { batch ->
+            val prompt = NotesPrompts.speakerSplit(batch, known)
+            val raw = chat(settings, settings.askModel, prompt.system, prompt.user, "speaker")
+            val array = JSONObject(extractJson(raw)).optJSONArray("assignments") ?: JSONArray()
+            for (i in 0 until array.length()) {
+                val item = array.optJSONObject(i) ?: continue
+                val label = item.optString("speaker").trim().take(60)
+                if (label.isNotBlank() && item.has("id")) { labels[item.optInt("id")] = label; known += label }
+            }
+        }
+        require(labels.isNotEmpty()) { "Invalid speaker labels; original labels were preserved" }
+        // Segments the model skipped keep their current label.
+        segments.associate { it.id to (labels[it.id] ?: it.speaker) }
+    }
+
+    private fun chunkSegments(segments: List<TranscriptSegment>, maxChars: Int): List<List<TranscriptSegment>> {
+        val out = mutableListOf<List<TranscriptSegment>>()
+        var current = mutableListOf<TranscriptSegment>()
+        var size = 0
+        for (segment in segments) {
+            val length = segment.text.length + 16
+            if (current.isNotEmpty() && size + length > maxChars) { out += current; current = mutableListOf(); size = 0 }
+            if (length > maxChars) {
+                // One enormous segment (an unsegmented transcript) is split by characters.
+                segment.text.chunked(maxChars - 16).forEach { out += listOf(segment.copy(text = it)) }
+                continue
+            }
+            current += segment; size += length
+        }
+        if (current.isNotEmpty()) out += current
+        return out
     }
 
     private fun extractJson(raw: String): String {
@@ -283,7 +320,21 @@ class CloudClient(private val cacheDirectory: File, private val onUsage: (ModelU
         return content.trim()
     }
 
-    private fun execute(request: Request): String = client.newCall(request).execute().use { response -> readResponse(response, request) }
+    private fun execute(request: Request): String {
+        var attempt = 0
+        while (true) {
+            val delay = client.newCall(request).execute().use { response ->
+                // Rate limits and transient server errors are retried after the provider's
+                // Retry-After; network failures are not, because they may already be billed.
+                val wait = if (response.isSuccessful) null
+                    else NetworkPolicy.retryDelayMs(response.code, response.header("Retry-After"), attempt)
+                if (wait == null) return readResponse(response, request)
+                wait
+            }
+            Thread.sleep(delay)
+            attempt++
+        }
+    }
 
     private fun readResponse(response: okhttp3.Response, request: Request): String {
         val text = response.body.string()
@@ -303,29 +354,18 @@ class CloudClient(private val cacheDirectory: File, private val onUsage: (ModelU
     private fun validateUrl(url: String, allowInsecure: Boolean, label: String) {
         val parsed = runCatching { url.toHttpUrl() }.getOrNull()
         val valid = parsed != null && parsed.username.isBlank() && parsed.password.isBlank() &&
-            (parsed.scheme == "https" || (allowInsecure && parsed.scheme == "http"))
-        require(valid) { "$label base URL must use HTTPS, unless insecure local HTTP is explicitly enabled" }
+            (parsed.scheme == "https" || (allowInsecure && parsed.scheme == "http" && NetworkPolicy.isLocalNetworkHost(parsed.host)))
+        require(valid) { "$label base URL must use HTTPS; plain HTTP is only allowed to this device or the local network after enabling it" }
     }
 
-    fun removeOverlap(previous: String, current: String): String {
-        if (previous.isBlank()) return current.trim()
-        val max = minOf(240, previous.length, current.length)
-        for (length in max downTo 6) {
-            if (previous.takeLast(length).trim().equals(current.take(length).trim(), ignoreCase = true)) return current.drop(length).trim()
-        }
-        return current.trim()
-    }
-
-    private fun renderSegments(segments: List<TranscriptSegment>): String = segments.joinToString("\n") {
-        "[${formatTimestamp(it.startMs)}] ${it.speaker}: ${it.text}"
-    }
-
-    private fun formatTimestamp(ms: Long): String {
-        val seconds = (ms / 1_000).coerceAtLeast(0)
-        return "%02d:%02d".format(seconds / 60, seconds % 60)
-    }
+    /** Desktop-equivalent overlap trimming (kept as a method for existing callers). */
+    fun removeOverlap(previous: String, current: String): String = Sentences.trimRepeatedPrefix(previous, current)
 
     companion object {
-        private const val SUMMARY_PROMPT = """You are a careful meeting assistant. Write a concise summary in the same primary language as the transcript. Include: overview, key points, decisions, action items with owners and deadlines when stated, and unresolved questions. Never invent missing details."""
+        private const val SUMMARY_CHUNK_CHARS = 24_000
+        // Roughly 50k tokens of Chinese; beyond this the transcript is condensed first.
+        private const val MINUTES_FULL_CHARS = 120_000
+        private const val TRANSLATE_BATCH = 20
+        private const val RESPLIT_BATCH = 150
     }
 }

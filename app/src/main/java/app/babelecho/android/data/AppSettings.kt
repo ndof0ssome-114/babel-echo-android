@@ -23,6 +23,13 @@ data class AppSettings(
     val chunkSeconds: Int = 25,
     val overlapSeconds: Int = 2,
     val autoSummarySeconds: Int = 180,
+    /** Automatic summaries wait for this much new text (desktop summary.minNewChars). */
+    val autoSummaryMinChars: Int = 200,
+    /** Summary length budget (desktop summary.maxChars). */
+    val summaryMaxChars: Int = 900,
+    /** Scene and notes detail for new recordings and imports. */
+    val noteMode: String = "meeting",
+    val notesDetail: String = "detailed",
     val translateTo: String = "",
     val allowInsecureHttp: Boolean = false,
     val asrPricePerHour: Double = 0.0,

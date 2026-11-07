@@ -148,6 +148,12 @@ internal fun SettingsScreen(modifier: Modifier, draft: AppSettings, onChange: (A
                 SettingsCard(t(lang, "录音后处理", "録音と処理", "Recording and processing")) {
                     SwitchRow(t(lang, "实时转写", "リアルタイム文字起こし", "Live transcription"), value.liveTranscription) { onChange(value.copy(liveTranscription = it)) }
                     Note(t(lang, "开启后，音频片段会发送到选定的识别服务。", "有効にすると音声を選択した認識サービスに送信します。", "When enabled, audio chunks go to the selected ASR service."))
+                    Selection(t(lang, "使用场景", "利用シーン", "Scene"), value.noteMode, listOf(
+                        Option(NotesPrompts.MODE_MEETING, t(lang, "会议：决议、待办、风险", "会議：決定・タスク・リスク", "Meeting: decisions, actions, risks")),
+                        Option(NotesPrompts.MODE_CLASS, t(lang, "上课：概念、例题、复习问答", "授業：概念・例題・復習", "Class: concepts, examples, review")))) { onChange(value.copy(noteMode = it)) }
+                    Selection(t(lang, "纪要详细度", "議事録の詳しさ", "Notes detail"), value.notesDetail, listOf(
+                        Option(NotesPrompts.DETAIL_DETAILED, t(lang, "详细", "詳細", "Detailed")),
+                        Option(NotesPrompts.DETAIL_STANDARD, t(lang, "标准", "標準", "Standard")))) { onChange(value.copy(notesDetail = it)) }
                     SwitchRow(t(lang, "结束后生成纪要", "終了後に議事録を作成", "Minutes after stopping"), value.autoMinutes) { onChange(value.copy(autoMinutes = it)) }
                     Note(t(lang, "有转写和可用模型时发送文字生成纪要。", "文字起こしとモデルがある場合にテキストを送信。", "Sends existing transcript text when the minutes model is configured."))
                 }

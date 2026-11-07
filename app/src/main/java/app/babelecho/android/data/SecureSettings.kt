@@ -38,6 +38,10 @@ class SecureSettings(context: Context) {
         chunkSeconds = prefs.getInt("chunk_seconds", 25).coerceIn(10, 120),
         overlapSeconds = prefs.getInt("overlap_seconds", 2).coerceIn(0, 10),
         autoSummarySeconds = prefs.getInt("auto_summary_seconds", 180).let { if (it == 0) 0 else it.coerceIn(60, 1_800) },
+        autoSummaryMinChars = prefs.getInt("auto_summary_min_chars", 200).coerceIn(0, 10_000),
+        summaryMaxChars = prefs.getInt("summary_max_chars", 900).coerceIn(200, 3_000),
+        noteMode = NotesPrompts.normalizeMode(prefs.getString("note_mode", null)),
+        notesDetail = NotesPrompts.normalizeDetail(prefs.getString("notes_detail", null)),
         translateTo = prefs.getString("translate_to", null) ?: "",
         allowInsecureHttp = prefs.getBoolean("allow_insecure_http", false),
         asrPricePerHour = prefs.getString("asr_price_hour", "0")?.toDoubleOrNull() ?: 0.0,
@@ -95,6 +99,10 @@ class SecureSettings(context: Context) {
             .putInt("overlap_seconds", value.overlapSeconds)
             .putInt("auto_summary_seconds", value.autoSummarySeconds)
             .putString("translate_to", value.translateTo)
+            .putInt("auto_summary_min_chars", value.autoSummaryMinChars.coerceIn(0, 10_000))
+            .putInt("summary_max_chars", value.summaryMaxChars.coerceIn(200, 3_000))
+            .putString("note_mode", NotesPrompts.normalizeMode(value.noteMode))
+            .putString("notes_detail", NotesPrompts.normalizeDetail(value.notesDetail))
             .putBoolean("allow_insecure_http", value.allowInsecureHttp)
             .putString("asr_price_hour", value.asrPricePerHour.toString())
             .putString("input_price_million", value.inputPricePerMillion.toString())

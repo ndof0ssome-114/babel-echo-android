@@ -11,8 +11,8 @@ android {
         applicationId = "app.babelecho.android"
         minSdk = 29
         targetSdk = 36
-        versionCode = 8
-        versionName = "0.2.0-alpha.8"
+        versionCode = 9
+        versionName = "0.2.0-alpha.9"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

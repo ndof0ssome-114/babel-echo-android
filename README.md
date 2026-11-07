@@ -79,9 +79,9 @@ For a LAN-hosted model, enter its OpenAI-compatible base URL. An Android emulato
 ./gradlew :app:assembleDebug
 ```
 
-APK 输出到 `app/build/outputs/apk/debug/app-debug.apk`。GitHub Actions 会对每次提交执行编译、Lint 和 APK 签名验证。
+APK 输出到 `app/build/outputs/apk/debug/app-debug.apk`。推送或 PR 到 `main` 时，仓库根目录的 GitHub Actions 会执行编译、Lint、JVM 单元测试和 APK 签名验证。
 
-The APK is written to `app/build/outputs/apk/debug/app-debug.apk`. GitHub Actions builds, lints, and verifies the APK signature on every push.
+The APK is written to `app/build/outputs/apk/debug/app-debug.apk`. On pushes and pull requests to `main`, GitHub Actions at the repository root builds, lints, runs JVM unit tests and verifies the APK signature.
 
 ## 隐私、合规与许可 / Privacy, compliance, and license
 

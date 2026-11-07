@@ -31,6 +31,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material3.*
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,6 +62,9 @@ import app.babelecho.android.data.ExportFormat
 import app.babelecho.android.data.MeetingExport
 import app.babelecho.android.data.AppSettings
 import app.babelecho.android.data.Meeting
+import app.babelecho.android.data.NotesPrompts
+import app.babelecho.android.data.MarkdownBlock
+import app.babelecho.android.data.MarkdownBlocks
 import app.babelecho.android.data.TranscriptSegment
 import kotlinx.coroutines.delay
 import java.text.DateFormat
@@ -175,6 +183,8 @@ private fun BabelEchoApp(viewModel: MainViewModel) {
                         onAsk = { question -> selected?.let { viewModel.ask(it, question) } }, onShare = { selected?.let { shareMeeting(context, it) } },
                         onImport = { importAsr = false; importMinutes = false; importDialog = true },
                         onRenameSpeaker = { original, name -> selected?.let { viewModel.renameSpeaker(it, original, name) } },
+                        onSegmentSpeaker = { id, name -> selected?.let { viewModel.setSegmentSpeaker(it, id, name) } },
+                        onNoteOptions = { mode, detail -> selected?.let { viewModel.setNoteOptions(it, mode, detail) } },
                         onResplitSpeakers = { selected?.let(viewModel::resplitSpeakers) },
                         onExport = { meeting, uri, format -> viewModel.exportMeeting(meeting, uri, format) }, onError = viewModel::showMessage,
                     )
@@ -242,6 +252,8 @@ private fun WorkspaceScreen(
     onShare: () -> Unit,
     onImport: () -> Unit,
     onRenameSpeaker: (String, String) -> Unit,
+    onSegmentSpeaker: (Int, String) -> Unit,
+    onNoteOptions: (String, String) -> Unit,
     onResplitSpeakers: () -> Unit,
     onExport: (Meeting, android.net.Uri, ExportFormat) -> Unit,
     onError: (String) -> Unit,
@@ -253,6 +265,8 @@ private fun WorkspaceScreen(
     var seekMs by remember(meeting?.id) { mutableStateOf<Long?>(null) }
     var seekRevision by remember(meeting?.id) { mutableIntStateOf(0) }
     var speaker by remember(meeting?.id) { mutableStateOf<String?>(null) }
+    // The sentence whose speaker label was tapped; null when renaming from elsewhere.
+    var speakerSegment by remember(meeting?.id) { mutableStateOf<Int?>(null) }
     var speakerDraft by remember { mutableStateOf("") }
     var exporting by remember { mutableStateOf(false) }
     var exportFormat by rememberSaveable { mutableStateOf(ExportFormat.Markdown) }
@@ -301,16 +315,23 @@ private fun WorkspaceScreen(
         item {
             GlassCard {
                 when (panel) {
-                    MeetingPanel.Transcript -> TranscriptPanel(lang, meeting, state.workingMeetingId != null, onTranscribe, onTranslate, { seekMs = it; seekRevision++ }, { speaker = it; speakerDraft = it }, onResplitSpeakers, busy, showSegments = meeting?.segments.isNullOrEmpty())
+                    MeetingPanel.Transcript -> TranscriptPanel(lang, meeting, state.workingMeetingId != null, onTranscribe, onTranslate, { seekMs = it; seekRevision++ }, { speaker = it.speaker; speakerSegment = null; speakerDraft = it.speaker }, onResplitSpeakers, busy, showSegments = meeting?.segments.isNullOrEmpty())
                     MeetingPanel.Summary -> TextPanel(lang, tr(lang, "实时摘要", "リアルタイム要約", "Live summary"), meeting?.summary.orEmpty(), tr(lang, "录音中按设置的间隔增量更新，也可以手动生成。", "録音中に増分更新できます。", "Updated incrementally while recording, or generated manually."), tr(lang, "重新总结", "再要約", "Summarize"), onSummarize, busy, !meeting?.transcript.isNullOrBlank())
-                    MeetingPanel.Minutes -> TextPanel(lang, tr(lang, "智能纪要", "議事録", "Meeting minutes"), meeting?.minutes.orEmpty(), tr(lang, "结构化整理结论、待办、风险和章节。", "決定・タスク・リスクを構造化します。", "Structured decisions, action items, risks, and chapters."), tr(lang, "生成纪要", "議事録を生成", "Create minutes"), onMinutes, busy, !meeting?.transcript.isNullOrBlank())
+                    MeetingPanel.Minutes -> {
+                        val classroom = meeting?.mode == NotesPrompts.MODE_CLASS
+                        if (meeting != null) NoteOptionsRow(lang, meeting.mode, meeting.notesDetail, !busy, onNoteOptions)
+                        TextPanel(lang, if (classroom) tr(lang, "课程笔记", "授業ノート", "Class notes") else tr(lang, "智能纪要", "議事録", "Meeting minutes"), meeting?.minutes.orEmpty(),
+                            if (classroom) tr(lang, "整理知识框架、概念、例题和复习问答。", "概念・例題・復習問答を整理します。", "Concepts, worked examples and review questions.")
+                            else tr(lang, "结构化整理结论、待办、风险和章节。", "決定・タスク・リスクを構造化します。", "Structured decisions, action items, risks, and chapters."),
+                            if (classroom) tr(lang, "生成笔记", "ノートを生成", "Create notes") else tr(lang, "生成纪要", "議事録を生成", "Create minutes"), onMinutes, busy, !meeting?.transcript.isNullOrBlank())
+                    }
                     MeetingPanel.Ask -> AskPanel(lang, meeting, busy || meeting?.transcript.isNullOrBlank(), onAsk)
                     MeetingPanel.Stats -> StatsPanel(lang, meeting, onShare, { exporting = true }, busy, state.settings)
                 }
             }
         }
         if (panel == MeetingPanel.Transcript && meeting != null) items(meeting.segments, key = { it.id }) { segment ->
-            GlassCard { TranscriptRow(segment, { seekMs = it; seekRevision++ }, { speaker = it; speakerDraft = it }, !busy) }
+            GlassCard { TranscriptRow(segment, { seekMs = it; seekRevision++ }, { speaker = it.speaker; speakerSegment = it.id; speakerDraft = it.speaker }, !busy) }
         }
     }
 
@@ -327,9 +348,27 @@ private fun WorkspaceScreen(
         }
     }
     if (speaker != null) AlertDialog(onDismissRequest = { speaker = null },
-        title = { Text(tr(lang, "修改说话人名称", "話者名を変更", "Rename speaker")) },
-        text = { OutlinedTextField(speakerDraft, { speakerDraft = it }, singleLine = true) },
-        confirmButton = { TextButton(enabled = speakerDraft.isNotBlank(), onClick = { onRenameSpeaker(speaker!!, speakerDraft); speaker = null }) { Text(tr(lang, "保存", "保存", "Save")) } },
+        title = { Text(tr(lang, "说话人", "話者", "Speaker")) },
+        text = {
+            Column {
+                OutlinedTextField(speakerDraft, { speakerDraft = it }, singleLine = true)
+                // Existing names: picking one for "this sentence" moves it; for "everywhere" it merges.
+                val known = meeting?.segments?.map { it.speaker }?.distinct().orEmpty().filter { it != speaker }
+                if (known.isNotEmpty()) Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    known.forEach { name -> AssistChip(onClick = { speakerDraft = name }, label = { Text(name) }) }
+                }
+                Text(tr(lang, "改成已有名字时，「全部改名」会合并这两位说话人。", "既存の名前にすると「すべて変更」で話者が統合されます。", "Renaming everywhere to an existing name merges the two speakers."),
+                    style = MaterialTheme.typography.bodySmall, color = Muted, modifier = Modifier.padding(top = 8.dp))
+            }
+        },
+        confirmButton = {
+            Row {
+                if (speakerSegment != null) TextButton(enabled = speakerDraft.isNotBlank(), onClick = { onSegmentSpeaker(speakerSegment!!, speakerDraft); speaker = null }) {
+                    Text(tr(lang, "只改这一句", "この文だけ", "This sentence"))
+                }
+                TextButton(enabled = speakerDraft.isNotBlank(), onClick = { onRenameSpeaker(speaker!!, speakerDraft); speaker = null }) { Text(tr(lang, "全部改名", "すべて変更", "Everywhere")) }
+            }
+        },
         dismissButton = { TextButton(onClick = { speaker = null }) { Text(tr(lang, "取消", "キャンセル", "Cancel")) } })
     if (rename) AlertDialog(
         onDismissRequest = { rename = false },
@@ -424,7 +463,7 @@ private fun MeetingTabs(lang: String, current: MeetingPanel, onSelect: (MeetingP
 }
 
 @Composable
-private fun TranscriptPanel(lang: String, meeting: Meeting?, working: Boolean, onTranscribe: () -> Unit, onTranslate: () -> Unit, onSeek: (Long) -> Unit, onSpeaker: (String) -> Unit, onResplit: () -> Unit, blocked: Boolean, showSegments: Boolean) {
+private fun TranscriptPanel(lang: String, meeting: Meeting?, working: Boolean, onTranscribe: () -> Unit, onTranslate: () -> Unit, onSeek: (Long) -> Unit, onSpeaker: (TranscriptSegment) -> Unit, onResplit: () -> Unit, blocked: Boolean, showSegments: Boolean) {
     PanelHeader(tr(lang, "实时转写", "リアルタイム文字起こし", "Live transcript"), "${meeting?.segments?.size ?: 0} ${tr(lang, "条", "件", "segments")}")
     if (meeting == null || (meeting.segments.isEmpty() && meeting.transcript.isBlank())) EmptyState(Icons.Rounded.GraphicEq, tr(lang, "还没有转写内容", "文字起こしはまだありません", "No transcript yet"), tr(lang, "可在设置中开启实时转写，或录完后手动转写。", "設定で文字起こしを有効にするか、録音後に実行してください。", "Enable live transcription in Settings, or transcribe after recording."))
     else if (showSegments) meeting.segments.ifEmpty { listOf(TranscriptSegment(0, 0, meeting.durationMs, text = meeting.transcript)) }.forEach { TranscriptRow(it, onSeek, onSpeaker, !blocked) }
@@ -437,21 +476,78 @@ private fun TranscriptPanel(lang: String, meeting: Meeting?, working: Boolean, o
 }
 
 @Composable
-private fun TranscriptRow(segment: TranscriptSegment, onSeek: (Long) -> Unit, onSpeaker: (String) -> Unit, enabled: Boolean) {
+private fun TranscriptRow(segment: TranscriptSegment, onSeek: (Long) -> Unit, onSpeaker: (TranscriptSegment) -> Unit, enabled: Boolean) {
     Row(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
         Text(formatDuration(segment.startMs), style = MaterialTheme.typography.labelSmall, color = Muted, modifier = Modifier.width(65.dp).clickable(enabled = enabled) { onSeek(segment.startMs) })
         Column(Modifier.weight(1f)) {
-            Text(segment.speaker, modifier = Modifier.clickable(enabled = enabled) { onSpeaker(segment.speaker) }, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            Text(segment.speaker, modifier = Modifier.clickable(enabled = enabled) { onSpeaker(segment) }, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
             SelectionContainer { Text(segment.text, lineHeight = MaterialTheme.typography.bodyLarge.lineHeight) }
             if (segment.translated.isNotBlank()) { Spacer(Modifier.height(5.dp)); SelectionContainer { Text(segment.translated, color = Muted, style = MaterialTheme.typography.bodyMedium) } }
         }
     }; HorizontalDivider(color = Ink.copy(alpha = .055f))
 }
 
+/** Summaries and notes as headings, lists and tables instead of raw `#` and `|` (see MarkdownBlocks). */
+@Composable
+private fun MarkdownText(markdown: String) {
+    fun styled(text: String): AnnotatedString = buildAnnotatedString {
+        MarkdownBlocks.inline(text).forEach { span ->
+            when {
+                span.bold -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(span.text) }
+                span.code -> withStyle(SpanStyle(fontFamily = FontFamily.Monospace, background = Indigo.copy(alpha = .08f))) { append(span.text) }
+                else -> append(span.text)
+            }
+        }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        MarkdownBlocks.parse(markdown).forEach { block ->
+            when (block) {
+                is MarkdownBlock.Heading -> Text(styled(block.text), fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = if (block.level <= 2) 6.dp else 2.dp),
+                    style = when (block.level) { 1 -> MaterialTheme.typography.titleLarge; 2 -> MaterialTheme.typography.titleMedium; 3 -> MaterialTheme.typography.titleSmall; else -> MaterialTheme.typography.bodyLarge })
+                is MarkdownBlock.Bullet -> Row(Modifier.padding(start = (block.depth * 14).dp)) {
+                    Text(block.marker, color = MaterialTheme.colorScheme.primary, modifier = Modifier.width(22.dp))
+                    Text(styled(block.text), modifier = Modifier.weight(1f))
+                }
+                is MarkdownBlock.Table -> Column(Modifier.horizontalScroll(rememberScrollState())) {
+                    val widths = (0 until maxOf(block.header.size, block.rows.maxOfOrNull { it.size } ?: 0)).map { 140.dp }
+                    @Composable fun row(cells: List<String>, header: Boolean) = Row {
+                        widths.forEachIndexed { index, width ->
+                            Text(styled(cells.getOrElse(index) { "" }), fontWeight = if (header) FontWeight.Bold else null,
+                                style = MaterialTheme.typography.bodySmall, modifier = Modifier.width(width).padding(horizontal = 4.dp, vertical = 5.dp))
+                        }
+                    }
+                    row(block.header, true)
+                    HorizontalDivider(color = Ink.copy(alpha = .12f))
+                    block.rows.forEach { row(it, false); HorizontalDivider(color = Ink.copy(alpha = .05f)) }
+                }
+                is MarkdownBlock.Quote -> Text(styled(block.text), color = Muted, modifier = Modifier.padding(start = 10.dp))
+                is MarkdownBlock.Code -> Text(block.text, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(Soft).padding(8.dp))
+                is MarkdownBlock.Paragraph -> Text(styled(block.text), lineHeight = MaterialTheme.typography.bodyLarge.lineHeight)
+                MarkdownBlock.Rule -> HorizontalDivider(color = Ink.copy(alpha = .1f))
+            }
+        }
+    }
+}
+
+/** Scene (meeting/class) and notes detail of the selected meeting, as on the desktop notes panel. */
+@Composable
+private fun NoteOptionsRow(lang: String, mode: String, detail: String, enabled: Boolean, onChange: (String, String) -> Unit) {
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        FilterChip(mode != NotesPrompts.MODE_CLASS, { onChange(NotesPrompts.MODE_MEETING, detail) }, { Text(tr(lang, "会议", "会議", "Meeting")) }, enabled = enabled)
+        FilterChip(mode == NotesPrompts.MODE_CLASS, { onChange(NotesPrompts.MODE_CLASS, detail) }, { Text(tr(lang, "上课", "授業", "Class")) }, enabled = enabled)
+        Spacer(Modifier.width(6.dp))
+        FilterChip(detail == NotesPrompts.DETAIL_STANDARD, { onChange(mode, NotesPrompts.DETAIL_STANDARD) }, { Text(tr(lang, "标准", "標準", "Standard")) }, enabled = enabled)
+        FilterChip(detail != NotesPrompts.DETAIL_STANDARD, { onChange(mode, NotesPrompts.DETAIL_DETAILED) }, { Text(tr(lang, "详细", "詳細", "Detailed")) }, enabled = enabled)
+    }
+    Text(tr(lang, "切换后已有内容保留，请重新生成。", "切り替えても既存の内容は残ります。再生成してください。", "Existing notes are kept; regenerate to apply."),
+        style = MaterialTheme.typography.bodySmall, color = Muted)
+}
+
 @Composable
 private fun TextPanel(lang: String, title: String, content: String, empty: String, action: String, onAction: () -> Unit, working: Boolean, available: Boolean) {
     PanelHeader(title, if (content.isBlank()) tr(lang, "尚未生成", "未生成", "Not generated") else tr(lang, "已更新", "更新済み", "Updated"))
-    if (content.isBlank()) EmptyState(Icons.Rounded.AutoAwesome, title, empty) else SelectionContainer { Text(content, lineHeight = MaterialTheme.typography.bodyLarge.lineHeight) }
+    if (content.isBlank()) EmptyState(Icons.Rounded.AutoAwesome, title, empty) else SelectionContainer { MarkdownText(content) }
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { TextButton(onClick = onAction, enabled = !working && available) { if (working) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Rounded.AutoAwesome, null, Modifier.size(17.dp)); Spacer(Modifier.width(5.dp)); Text(action) } }
 }
 
@@ -484,7 +580,7 @@ private fun StatsPanel(lang: String, meeting: Meeting?, onShare: () -> Unit, onE
         (stats?.outputTokens ?: 0) / 1_000_000.0 * settings.outputPricePerMillion
     StatRow(tr(lang, "按当前费率估算（非账单）", "現在の単価による概算（請求額ではありません）", "Estimate at current rates (not a bill)"), if (settings.asrPricePerHour + settings.inputPricePerMillion + settings.outputPricePerMillion > 0) String.format(Locale.US, "%.4f %s", estimate, settings.priceCurrency) else tr(lang, "请在设置中填写费率", "設定で単価を入力", "Set rates in Settings"))
     Text(tr(lang, "包含返回空内容或被截断的文本请求；未返回用量的请求和旧会议可能低估。思考 token 已包含在输出中。", "空・途中の応答も集計。未報告の使用量は過小計上。思考 token は出力に含まれます。", "Includes empty/truncated text responses. Missing usage and older meetings may be undercounted. Reasoning tokens are included in output."), style = MaterialTheme.typography.bodySmall, color = Muted)
-    Spacer(Modifier.height(10.dp)); OutlinedButton(onClick = onExport, enabled = meeting != null && !busy, modifier = Modifier.fillMaxWidth()) { Text(tr(lang, "导出文件（MD / TXT / VTT / JSON / WAV）", "ファイル保存（MD / TXT / VTT / JSON / WAV）", "Export file (MD / TXT / VTT / JSON / WAV)")) }
+    Spacer(Modifier.height(10.dp)); OutlinedButton(onClick = onExport, enabled = meeting != null && !busy, modifier = Modifier.fillMaxWidth()) { Text(tr(lang, "导出文件（MD / TXT / VTT / SRT / JSON / WAV）", "ファイル保存（MD / TXT / VTT / SRT / JSON / WAV）", "Export file (MD / TXT / VTT / SRT / JSON / WAV)")) }
     Spacer(Modifier.height(10.dp)); Button(onClick = onShare, enabled = meeting != null, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Indigo, contentColor = Color.White)) { Icon(Icons.Rounded.Share, null); Spacer(Modifier.width(6.dp)); Text(tr(lang, "分享 Markdown", "Markdown を共有", "Share Markdown")) }
 }
 

@@ -30,11 +30,15 @@ jobs:
         run: ./gradlew --no-daemon :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
       - name: Verify APK signature
         run: /usr/local/lib/android/sdk/build-tools/36.0.0/apksigner verify --verbose --print-certs app/build/outputs/apk/debug/app-debug.apk
-      - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk BabelEcho-Android-0.2.0-alpha.8-debug.apk
+      - name: Name APK after the app version
+        run: |
+          version=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' app/build.gradle.kts)
+          test -n "$version"
+          cp app/build/outputs/apk/debug/app-debug.apk "BabelEcho-Android-${version}-debug.apk"
+          echo "APK_NAME=BabelEcho-Android-${version}-debug" >> "$GITHUB_ENV"
       - uses: actions/upload-artifact@v5
         with:
-          name: BabelEcho-Android-0.2.0-alpha.8-debug
-          path: BabelEcho-Android-0.2.0-alpha.8-debug.apk
+          name: ${{ env.APK_NAME }}
+          path: ${{ env.APK_NAME }}.apk
           if-no-files-found: error
           retention-days: 30

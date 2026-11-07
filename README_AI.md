@@ -1,5 +1,7 @@
 # Babel Echo Android — AI implementation guide
 
+> **Public snapshot.** This repository is the published release snapshot of `apps/android` from the private Babel Echo development repository; development happens there and each public release is synced here with its source. References below to the monorepo root documents (`AGENTS.md`, `README_AI.md`, `docs/…`) point into that private repository. Downloads: https://github.com/ndof0ssome-114/babel-echo-android/releases
+
 Last reviewed: 2026-11-04
 
 This document is the authoritative Android implementation guide. Read the monorepo root `README_AI.md` first. Paths here are relative to `apps/android`.
